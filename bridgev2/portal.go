@@ -3310,6 +3310,8 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 	}
 	// (WL) 2025-11-09 : Remote Message Removing is now disabled !  --------------------------------------
 
+	res := portal.redactMessageParts(ctx, targetParts, intent, getEventTS(evt))
+
 	remoteSender := evt.GetSender(); 
 	fromMe := ""
 	if remoteSender.IsFromMe {
@@ -3317,6 +3319,7 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 	} else { fromMe = "OTHERS!" }
 		
 	log.Debug().Str("remote_sender", string(remoteSender.Sender) ). Msg("--(WL)-- Message Remove Event !!! --> " + fromMe )
+
 
 	// PRINT: intent.GetMXID(), targetparts[0].SenderMXID and the comparizon ! 
 	
