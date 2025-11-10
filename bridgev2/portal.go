@@ -3308,11 +3308,28 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 			intent = senderIntent
 		}
 	}
-	res := portal.redactMessageParts(ctx, targetParts, intent, getEventTS(evt))
-	err = portal.Bridge.DB.Message.DeleteAllParts(ctx, portal.Receiver, evt.GetTargetMessage())
-	if err != nil {
-		log.Err(err).Msg("Failed to delete target message from database")
-	}
+	// (WL) 2025-11-09 : Remote Message Removing is now disabled !  --------------------------------------
+
+	remoteSender := evt.GetSender(); 
+	fromMe := ""
+	if remoteSender.IsFromMe {
+		fromMe = "ME!" 
+	} else { fromMe = "OTHERS!" }
+		
+	log.Debug().Str("remote_sender", string(remoteSender.Sender) ). Msg("--(WL)-- Message Remove Event !!! --> " + fromMe )
+
+	// PRINT: intent.GetMXID(), targetparts[0].SenderMXID and the comparizon ! 
+	
+	// (WL) 2025-11-09 : Remote Message Removing is now disabled !  --------------------------------------
+
+	// (WL) 2025-11-09 : Database Deletion disabled anyway ! ---------------------------------------------
+
+	// err = portal.Bridge.DB.Message.DeleteAllParts(ctx, portal.Receiver, evt.GetTargetMessage())
+	// if err != nil {
+	// 	log.Err(err).Msg("Failed to delete target message from database")
+	// }
+
+	// (WL) 2025-11-09 : Database Deletion disabled anyway ! ---------------------------------------------
 	return res
 }
 
