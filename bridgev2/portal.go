@@ -3322,8 +3322,9 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 	res := EventHandlingResultSuccess
 	
 	if !remoteSender.IsFromMe {
-	    // _, _ = intent.SendText( ctx, portal.MXID, "<<< MESSAGE ABOVE WAS REMOVED >>>" )			
-
+		// Send a Notice only to Matrix Room about the message that was removed ! 
+		// This code replaced the old intent.SendText() code ! 
+		
 		_, _ = intent.SendMessage(ctx, portal.MXID, event.EventMessage, &event.Content{
 			Parsed: &event.MessageEventContent{
 				MsgType:  event.MsgNotice,
@@ -3337,10 +3338,8 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 			Timestamp: getEventTS(evt),
 		})
 
-
 	} else {
 		res = portal.redactMessageParts(ctx, targetParts, intent, getEventTS(evt))		
-
 		err = portal.Bridge.DB.Message.DeleteAllParts(ctx, portal.Receiver, evt.GetTargetMessage())
 		if err != nil {
 		  log.Err(err).Msg("Failed to delete target message from database")
