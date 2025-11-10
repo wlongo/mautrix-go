@@ -3310,29 +3310,44 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 	}
 	// (WL) 2025-11-09 : Remote Message Removing is now disabled !  --------------------------------------
 
-
 	remoteSender := evt.GetSender(); 
 	fromMe := ""
+	
 	if remoteSender.IsFromMe {
 		fromMe = "ME!" 
 	} else { fromMe = "OTHERS!" }
 		
-	log.Warn().Str("remote_sender", string(remoteSender.Sender) ).Msg("--(WL)-- Message Remove Event !!! --> " + fromMe )
+	log.Warn().Str("remote_sender", string(remoteSender.Sender) ).Msg("--(WL)-- Message Remove Event !!! --> IsFromMe? " + fromMe )
 
-	res := portal.redactMessageParts(ctx, targetParts, intent, getEventTS(evt))
-
-	// PRINT: intent.GetMXID(), targetparts[0].SenderMXID and the comparizon ! 
+	res := EventHandlingResultSuccess
 	
+	if !remoteSender.IsFromMe {
+	    // _, _ = intent.SendText( ctx, portal.MXID, "<<< MESSAGE ABOVE WAS REMOVED >>>" )			
+
+		_, _ = intent.SendMessage(ctx, portal.MXID, event.EventMessage, &event.Content{
+			Parsed: &event.MessageEventContent{
+				MsgType:  event.MsgNotice,
+				Body:     "<<< MESSAGE ABOVE WAS REMOVED >>>",
+				Mentions: &event.Mentions{},
+			},
+			Raw: map[string]any{
+				"fi.mau.bridge.extensions": "MessageRemovalDisabled",
+			},
+		}, &MatrixSendExtra{
+			Timestamp: getEventTS(evt),
+		})
+
+
+	} else {
+		res = portal.redactMessageParts(ctx, targetParts, intent, getEventTS(evt))		
+
+		err = portal.Bridge.DB.Message.DeleteAllParts(ctx, portal.Receiver, evt.GetTargetMessage())
+		if err != nil {
+		  log.Err(err).Msg("Failed to delete target message from database")
+		}	
+	}
 	// (WL) 2025-11-09 : Remote Message Removing is now disabled !  --------------------------------------
 
-	// (WL) 2025-11-09 : Database Deletion disabled anyway ! ---------------------------------------------
-
-	// err = portal.Bridge.DB.Message.DeleteAllParts(ctx, portal.Receiver, evt.GetTargetMessage())
-	// if err != nil {
-	// 	log.Err(err).Msg("Failed to delete target message from database")
-	// }
-
-	// (WL) 2025-11-09 : Database Deletion disabled anyway ! ---------------------------------------------
 	return res
 }
 
