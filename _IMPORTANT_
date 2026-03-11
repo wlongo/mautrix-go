@@ -2,6 +2,8 @@
 
 mautrix-go Project ( embedded git repository on the mod folder inside mautrix-wbatsapp git repository ) 
 
+Last Version : 0.26.3 at 11/03/2026 
+
 Files ChangeLog: 
 11/03/2026 : bridgev2/portal.go   :   Message Removal Disabled
 
