@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/dbutil"
+	"go.mau.fi/util/exhttp"
 	"go.mau.fi/util/exsync"
 
 	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
@@ -52,6 +54,7 @@ type Bridge struct {
 
 	Background          bool
 	ExternallyManagedDB bool
+	stopping            atomic.Bool
 
 	wakeupBackfillQueue chan struct{}
 	stopBackfillQueue   *exsync.Event
@@ -127,6 +130,7 @@ func (br *Bridge) Start(ctx context.Context) error {
 
 func (br *Bridge) RunOnce(ctx context.Context, loginID networkid.UserLoginID, params *ConnectBackgroundParams) error {
 	br.Background = true
+	br.stopping.Store(false)
 	err := br.StartConnectors(ctx)
 	if err != nil {
 		return err
@@ -162,6 +166,7 @@ func (br *Bridge) RunOnce(ctx context.Context, loginID networkid.UserLoginID, pa
 		case <-time.After(20 * time.Second):
 		case <-ctx.Done():
 		}
+		br.stopping.Store(true)
 		return nil
 	} else {
 		br.Log.Info().Str("user_login_id", string(login.ID)).Msg("Starting individual user login in background mode")
@@ -171,6 +176,7 @@ func (br *Bridge) RunOnce(ctx context.Context, loginID networkid.UserLoginID, pa
 
 func (br *Bridge) StartConnectors(ctx context.Context) error {
 	br.Log.Info().Msg("Starting bridge")
+	br.stopping.Store(false)
 	if br.BackgroundCtx == nil || br.BackgroundCtx.Err() != nil {
 		br.BackgroundCtx, br.cancelBackgroundCtx = context.WithCancel(context.Background())
 		br.BackgroundCtx = br.Log.WithContext(br.BackgroundCtx)
@@ -368,6 +374,46 @@ func (br *Bridge) StartLogins(ctx context.Context) error {
 	return nil
 }
 
+func (br *Bridge) ResetNetworkConnections() {
+	nrn, ok := br.Network.(NetworkResettingNetwork)
+	if ok {
+		br.Log.Info().Msg("Resetting network connections with NetworkConnector.ResetNetworkConnections")
+		nrn.ResetNetworkConnections()
+		return
+	}
+
+	br.Log.Info().Msg("Network connector doesn't support ResetNetworkConnections, recreating clients manually")
+	for _, login := range br.GetAllCachedUserLogins() {
+		login.Log.Debug().Msg("Disconnecting and recreating client for network reset")
+		ctx := login.Log.WithContext(br.BackgroundCtx)
+		login.Client.Disconnect()
+		err := login.recreateClient(ctx)
+		if err != nil {
+			login.Log.Err(err).Msg("Failed to recreate client during network reset")
+			login.BridgeState.Send(status.BridgeState{
+				StateEvent: status.StateUnknownError,
+				Error:      "bridgev2-network-reset-fail",
+				Info:       map[string]any{"go_error": err.Error()},
+			})
+		} else {
+			login.Client.Connect(ctx)
+		}
+	}
+	br.Log.Info().Msg("Finished resetting all user logins")
+}
+
+func (br *Bridge) GetHTTPClientSettings() exhttp.ClientSettings {
+	mchs, ok := br.Matrix.(MatrixConnectorWithHTTPSettings)
+	if ok {
+		return mchs.GetHTTPClientSettings()
+	}
+	return exhttp.SensibleClientSettings
+}
+
+func (br *Bridge) IsStopping() bool {
+	return br.stopping.Load()
+}
+
 func (br *Bridge) Stop() {
 	br.stop(false, 0)
 }
@@ -378,6 +424,7 @@ func (br *Bridge) StopWithTimeout(timeout time.Duration) {
 
 func (br *Bridge) stop(isRunOnce bool, timeout time.Duration) {
 	br.Log.Info().Msg("Shutting down bridge")
+	br.stopping.Store(true)
 	br.DisappearLoop.Stop()
 	br.stopBackfillQueue.Set()
 	br.Matrix.PreStop()

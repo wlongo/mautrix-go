@@ -85,9 +85,8 @@ const (
 	provisioningUserKey provisioningContextKey = iota
 	provisioningUserLoginKey
 	provisioningLoginProcessKey
+	ProvisioningKeyRequest
 )
-
-const ProvisioningKeyRequest = "fi.mau.provision.request"
 
 func (prov *ProvisioningAPI) GetUser(r *http.Request) *bridgev2.User {
 	return r.Context().Value(provisioningUserKey).(*bridgev2.User)
@@ -97,12 +96,7 @@ func (prov *ProvisioningAPI) GetRouter() *http.ServeMux {
 	return prov.Router
 }
 
-type IProvisioningAPI interface {
-	GetRouter() *http.ServeMux
-	GetUser(r *http.Request) *bridgev2.User
-}
-
-func (br *Connector) GetProvisioning() IProvisioningAPI {
+func (br *Connector) GetProvisioning() bridgev2.IProvisioningAPI {
 	return br.Provisioning
 }
 
@@ -409,10 +403,18 @@ func (prov *ProvisioningAPI) PostLoginStart(w http.ResponseWriter, r *http.Reque
 		Override: overrideLogin,
 	}
 	prov.loginsLock.Unlock()
+	zerolog.Ctx(r.Context()).Info().
+		Any("first_step", firstStep).
+		Msg("Created login process")
 	exhttp.WriteJSONResponse(w, http.StatusOK, &RespSubmitLogin{LoginID: loginID, LoginStep: firstStep})
 }
 
 func (prov *ProvisioningAPI) handleCompleteStep(ctx context.Context, login *ProvLogin, step *bridgev2.LoginStep) {
+	zerolog.Ctx(ctx).Info().
+		Str("step_id", step.StepID).
+		Str("user_login_id", string(step.CompleteParams.UserLoginID)).
+		Msg("Login completed successfully")
+	prov.deleteLogin(login, false)
 	if login.Override == nil || login.Override.ID == step.CompleteParams.UserLoginID {
 		return
 	}
@@ -424,6 +426,15 @@ func (prov *ProvisioningAPI) handleCompleteStep(ctx context.Context, login *Prov
 		StateEvent: status.StateLoggedOut,
 		Reason:     "LOGIN_OVERRIDDEN",
 	}, bridgev2.DeleteOpts{LogoutRemote: true})
+}
+
+func (prov *ProvisioningAPI) deleteLogin(login *ProvLogin, cancel bool) {
+	if cancel {
+		login.Process.Cancel()
+	}
+	prov.loginsLock.Lock()
+	delete(prov.logins, login.ID)
+	prov.loginsLock.Unlock()
 }
 
 func (prov *ProvisioningAPI) PostLoginStep(w http.ResponseWriter, r *http.Request) {
@@ -496,11 +507,14 @@ func (prov *ProvisioningAPI) PostLoginSubmitInput(w http.ResponseWriter, r *http
 	if err != nil {
 		zerolog.Ctx(r.Context()).Err(err).Msg("Failed to submit input")
 		RespondWithError(w, err, "Internal error submitting input")
+		prov.deleteLogin(login, true)
 		return
 	}
 	login.NextStep = nextStep
 	if nextStep.Type == bridgev2.LoginStepTypeComplete {
 		prov.handleCompleteStep(r.Context(), login, nextStep)
+	} else {
+		zerolog.Ctx(r.Context()).Debug().Any("next_step", nextStep).Msg("Returning next login step")
 	}
 	exhttp.WriteJSONResponse(w, http.StatusOK, &RespSubmitLogin{LoginID: login.ID, LoginStep: nextStep})
 }
@@ -514,11 +528,14 @@ func (prov *ProvisioningAPI) PostLoginWait(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		zerolog.Ctx(r.Context()).Err(err).Msg("Failed to wait")
 		RespondWithError(w, err, "Internal error waiting for login")
+		prov.deleteLogin(login, true)
 		return
 	}
 	login.NextStep = nextStep
 	if nextStep.Type == bridgev2.LoginStepTypeComplete {
 		prov.handleCompleteStep(r.Context(), login, nextStep)
+	} else {
+		zerolog.Ctx(r.Context()).Debug().Any("next_step", nextStep).Msg("Returning next login step")
 	}
 	exhttp.WriteJSONResponse(w, http.StatusOK, &RespSubmitLogin{LoginID: login.ID, LoginStep: nextStep})
 }

@@ -43,13 +43,13 @@ type ASIntent struct {
 
 var _ bridgev2.MatrixAPI = (*ASIntent)(nil)
 var _ bridgev2.MarkAsDMMatrixAPI = (*ASIntent)(nil)
+var _ bridgev2.EphemeralSendingMatrixAPI = (*ASIntent)(nil)
 
 func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
 	if extra == nil {
 		extra = &bridgev2.MatrixSendExtra{}
 	}
-	// TODO remove this once hungryserv and synapse support sending m.room.redactions directly in all room versions
-	if eventType == event.EventRedaction {
+	if eventType == event.EventRedaction && !as.Connector.SpecVersions.Supports(mautrix.FeatureRedactSendAsEvent) {
 		parsedContent := content.Parsed.(*event.RedactionEventContent)
 		as.Matrix.AddDoublePuppetValue(content)
 		return as.Matrix.RedactEvent(ctx, roomID, parsedContent.Redacts, mautrix.ReqRedact{
@@ -57,7 +57,7 @@ func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType
 			Extra:  content.Raw,
 		})
 	}
-	if eventType != event.EventReaction && eventType != event.EventRedaction {
+	if (eventType != event.EventReaction || as.Connector.Config.Encryption.MSC4392) && eventType != event.EventRedaction {
 		msgContent, ok := content.Parsed.(*event.MessageEventContent)
 		if ok {
 			msgContent.AddPerMessageProfileFallback()
@@ -82,11 +82,22 @@ func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType
 			eventType = event.EventEncrypted
 		}
 	}
-	if extra.Timestamp.IsZero() {
-		return as.Matrix.SendMessageEvent(ctx, roomID, eventType, content)
-	} else {
-		return as.Matrix.SendMassagedMessageEvent(ctx, roomID, eventType, content, extra.Timestamp.UnixMilli())
+	return as.Matrix.SendMessageEvent(ctx, roomID, eventType, content, mautrix.ReqSendEvent{Timestamp: extra.Timestamp.UnixMilli()})
+}
+
+func (as *ASIntent) BeeperSendEphemeralEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, txnID string) (*mautrix.RespSendEvent, error) {
+	if !as.Connector.SpecVersions.Supports(mautrix.BeeperFeatureEphemeralEvents) {
+		return nil, mautrix.MUnrecognized.WithMessage("Homeserver does not advertise com.beeper.ephemeral support")
 	}
+	if encrypted, err := as.Matrix.StateStore.IsEncrypted(ctx, roomID); err != nil {
+		return nil, fmt.Errorf("failed to check if room is encrypted: %w", err)
+	} else if encrypted && as.Connector.Crypto != nil {
+		if err = as.Connector.Crypto.Encrypt(ctx, roomID, eventType, content); err != nil {
+			return nil, err
+		}
+		eventType = event.EventEncrypted
+	}
+	return as.Matrix.BeeperSendEphemeralEvent(ctx, roomID, eventType, content, mautrix.ReqSendEvent{TransactionID: txnID})
 }
 
 func (as *ASIntent) fillMemberEvent(ctx context.Context, roomID id.RoomID, userID id.UserID, content *event.Content) {
@@ -126,11 +137,7 @@ func (as *ASIntent) SendState(ctx context.Context, roomID id.RoomID, eventType e
 	if eventType == event.StateMember {
 		as.fillMemberEvent(ctx, roomID, id.UserID(stateKey), content)
 	}
-	if ts.IsZero() {
-		resp, err = as.Matrix.SendStateEvent(ctx, roomID, eventType, stateKey, content)
-	} else {
-		resp, err = as.Matrix.SendMassagedStateEvent(ctx, roomID, eventType, stateKey, content, ts.UnixMilli())
-	}
+	resp, err = as.Matrix.SendStateEvent(ctx, roomID, eventType, stateKey, content, mautrix.ReqSendEvent{Timestamp: ts.UnixMilli()})
 	if err != nil && eventType == event.StateMember {
 		var httpErr mautrix.HTTPError
 		if errors.As(err, &httpErr) && httpErr.RespError != nil &&
@@ -412,6 +419,7 @@ func (as *ASIntent) UploadMediaStream(
 			removeAndClose(replFile)
 			removeAndClose(tempFile)
 		}
+		req.AsyncContext = zerolog.Ctx(ctx).WithContext(as.Connector.Bridge.BackgroundCtx)
 		startedAsyncUpload = true
 		var resp *mautrix.RespCreateMXC
 		resp, err = as.Matrix.UploadAsync(ctx, req)
@@ -444,6 +452,7 @@ func (as *ASIntent) doUploadReq(ctx context.Context, file *event.EncryptedFileIn
 				as.Connector.uploadSema.Release(int64(len(req.ContentBytes)))
 			}
 		}
+		req.AsyncContext = zerolog.Ctx(ctx).WithContext(as.Connector.Bridge.BackgroundCtx)
 		var resp *mautrix.RespCreateMXC
 		resp, err = as.Matrix.UploadAsync(ctx, req)
 		if resp != nil {
@@ -521,6 +530,39 @@ func (br *Connector) getDefaultEncryptionEvent() *event.EncryptionEventContent {
 	return content
 }
 
+func (as *ASIntent) filterCreateRequestForV12(ctx context.Context, req *mautrix.ReqCreateRoom) {
+	if as.Connector.Config.Homeserver.Software == bridgeconfig.SoftwareHungry {
+		// Hungryserv doesn't override the capabilities endpoint nor do room versions
+		return
+	}
+	caps := as.Connector.fetchCapabilities(ctx)
+	roomVer := req.RoomVersion
+	if roomVer == "" && caps != nil && caps.RoomVersions != nil {
+		roomVer = id.RoomVersion(caps.RoomVersions.Default)
+	}
+	if roomVer != "" && !roomVer.PrivilegedRoomCreators() {
+		return
+	}
+	creators, _ := req.CreationContent["additional_creators"].([]id.UserID)
+	creators = append(slices.Clone(creators), as.GetMXID())
+	if req.PowerLevelOverride != nil {
+		for _, creator := range creators {
+			delete(req.PowerLevelOverride.Users, creator)
+		}
+	}
+	for _, evt := range req.InitialState {
+		if evt.Type != event.StatePowerLevels {
+			continue
+		}
+		content, ok := evt.Content.Parsed.(*event.PowerLevelsEventContent)
+		if ok {
+			for _, creator := range creators {
+				delete(content.Users, creator)
+			}
+		}
+	}
+}
+
 func (as *ASIntent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (id.RoomID, error) {
 	if as.Connector.Config.Encryption.Default {
 		req.InitialState = append(req.InitialState, &event.Event{
@@ -536,6 +578,7 @@ func (as *ASIntent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) 
 		}
 		req.CreationContent["m.federate"] = false
 	}
+	as.filterCreateRequestForV12(ctx, req)
 	resp, err := as.Matrix.CreateRoom(ctx, req)
 	if err != nil {
 		return "", err
@@ -689,10 +732,10 @@ func (as *ASIntent) GetEvent(ctx context.Context, roomID id.RoomID, eventID id.E
 	}
 
 	if evt.Type == event.EventEncrypted {
-		if as.Connector.Config.Encryption.DeleteKeys.RatchetOnDecrypt {
+		if as.Connector.Crypto == nil || as.Connector.Config.Encryption.DeleteKeys.RatchetOnDecrypt {
 			return nil, errors.New("can't decrypt the event")
 		}
-		return as.Matrix.Crypto.Decrypt(ctx, evt)
+		return as.Connector.Crypto.Decrypt(ctx, evt)
 	}
 
 	return evt, nil

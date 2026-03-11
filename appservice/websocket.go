@@ -14,7 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,7 +56,7 @@ func (wsc *WebsocketCommand) MakeResponse(ok bool, data any) *WebsocketRequest {
 		var prefixMessage string
 		for unwrappedErr != nil {
 			errorData, jsonErr = json.Marshal(unwrappedErr)
-			if errorData != nil && len(errorData) > 2 && jsonErr == nil {
+			if len(errorData) > 2 && jsonErr == nil {
 				prefixMessage = strings.Replace(err.Error(), unwrappedErr.Error(), "", 1)
 				prefixMessage = strings.TrimRight(prefixMessage, ": ")
 				break
@@ -374,7 +374,7 @@ func (as *AppService) StartWebsocket(ctx context.Context, baseURL string, onConn
 		copiedURL := *as.hsURLForClient
 		parsed = &copiedURL
 	}
-	parsed.Path = filepath.Join(parsed.Path, "_matrix/client/unstable/fi.mau.as_sync")
+	parsed.Path = path.Join(parsed.Path, "_matrix/client/unstable/fi.mau.as_sync")
 	if parsed.Scheme == "http" {
 		parsed.Scheme = "ws"
 	} else if parsed.Scheme == "https" {

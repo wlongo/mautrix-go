@@ -1,3 +1,130 @@
+## v0.26.3 (2026-02-16)
+
+* Bumped minimum Go version to 1.25.
+* *(client)* Added fields for sending [MSC4354] sticky events.
+* *(bridgev2)* Added automatic message request accepting when sending message.
+* *(mediaproxy)* Added support for federation thumbnail endpoint.
+* *(crypto/ssss)* Improved support for recovery keys with slightly broken
+  metadata.
+* *(crypto)* Changed key import to call session received callback even for
+  sessions that already exist in the database.
+* *(appservice)* Fixed building websocket URL accidentally using file path
+  separators instead of always `/`.
+* *(crypto)* Fixed key exports not including the `sender_claimed_keys` field.
+* *(client)* Fixed incorrect context usage in async uploads.
+* *(crypto)* Fixed panic when passing invalid input to megolm message index
+  parser used for debugging.
+* *(bridgev2/provisioning)* Fixed completed or failed logins not being cleaned
+  up properly.
+
+[MSC4354]: https://github.com/matrix-org/matrix-spec-proposals/pull/4354
+
+## v0.26.2 (2026-01-16)
+
+* *(bridgev2)* Added chunked portal deletion to avoid database locks when
+  deleting large portals.
+* *(crypto,bridgev2)* Added option to encrypt reaction and reply metadata
+  as per [MSC4392].
+* *(bridgev2/login)* Added `default_value` for user input fields.
+* *(bridgev2)* Added interfaces to let the Matrix connector provide suggested
+  HTTP client settings and to reset active connections of the network connector.
+* *(bridgev2)* Added interface to let network connectors get the provisioning
+  API HTTP router and add new endpoints.
+* *(event)* Added blurhash field to Beeper link preview objects.
+* *(event)* Added [MSC4391] support for bot commands.
+* *(event)* Dropped [MSC4332] support for bot commands.
+* *(client)* Changed media download methods to return an error if the provided
+  MXC URI is empty.
+* *(client)* Stabilized support for [MSC4323].
+* *(bridgev2/matrix)* Fixed `GetEvent` panicking when trying to decrypt events.
+* *(bridgev2)* Fixed some deadlocks when room creation happens in parallel with
+  a portal re-ID call.
+
+[MSC4391]: https://github.com/matrix-org/matrix-spec-proposals/pull/4391
+[MSC4392]: https://github.com/matrix-org/matrix-spec-proposals/pull/4392
+
+## v0.26.1 (2025-12-16)
+
+* **Breaking change *(mediaproxy)*** Changed `GetMediaResponseFile` to return
+  the mime type from the callback rather than in the return get media return
+  value. The callback can now also redirect the caller to a different file.
+* *(federation)* Added join/knock/leave functions
+  (thanks to [@nexy7574] in [#422]).
+* *(federation/eventauth)* Fixed various incorrect checks.
+* *(client)* Added backoff for retrying media uploads to external URLs
+  (with MSC3870).
+* *(bridgev2/config)* Added support for overriding config fields using
+  environment variables.
+* *(bridgev2/commands)* Added command to mute chat on remote network.
+* *(bridgev2)* Added interface for network connectors to redirect to a different
+  user ID when handling an invite from Matrix.
+* *(bridgev2)* Added interface for signaling message request status of portals.
+* *(bridgev2)* Changed portal creation to not backfill unless `CanBackfill` flag
+  is set in chat info.
+* *(bridgev2)* Changed Matrix reaction handling to only delete old reaction if
+  bridging the new one is successful.
+* *(bridgev2/mxmain)* Improved error message when trying to run bridge with
+  pre-megabridge database when no database migration exists.
+* *(bridgev2)* Improved reliability of database migration when enabling split
+  portals.
+* *(bridgev2)* Improved detection of orphaned DM rooms when starting new chats.
+* *(bridgev2)* Stopped sending redundant invites when joining ghosts to public
+  portal rooms.
+* *(bridgev2)* Stopped hardcoding room versions in favor of checking
+  server capabilities to determine appropriate `/createRoom` parameters.
+
+[#422]: https://github.com/mautrix/go/pull/422
+
+## v0.26.0 (2025-11-16)
+
+* *(client,appservice)* Deprecated `SendMassagedStateEvent` as `SendStateEvent`
+  has been able to do the same for a while now.
+* *(client,federation)* Added size limits for responses to make it safer to send
+  requests to untrusted servers.
+* *(client)* Added wrapper for `/admin/whois` client API
+  (thanks to [@nexy7574] in [#411]).
+* *(synapseadmin)* Added `force_purge` option to DeleteRoom
+  (thanks to [@nexy7574] in [#420]).
+* *(statestore)* Added saving join rules for rooms.
+* *(bridgev2)* Added optional automatic rollback of room state if bridging the
+  change to the remote network fails.
+* *(bridgev2)* Added management room notices if transient disconnect state
+  doesn't resolve within 3 minutes.
+* *(bridgev2)* Added interface to signal that certain participants couldn't be
+  invited when creating a group.
+* *(bridgev2)* Added `select` type for user input fields in login.
+* *(bridgev2)* Added interface to let network connector customize personal
+  filtering space.
+* *(bridgev2/matrix)* Added checks to avoid sending error messages in reply to
+  other bots.
+* *(bridgev2/matrix)* Switched to using [MSC4169] to send redactions whenever
+  possible.
+* *(bridgev2/publicmedia)* Added support for custom path prefixes, file names,
+  and encrypted files.
+* *(bridgev2/commands)* Added command to resync a single portal.
+* *(bridgev2/commands)* Added create group command.
+* *(bridgev2/config)* Added option to limit maximum number of logins.
+* *(bridgev2)* Changed ghost joining to skip unnecessary invite if portal room
+  is public.
+* *(bridgev2/disappear)* Changed read receipt handling to only start
+  disappearing timers for messages up to the read message (note: may not work in
+  all cases if the read receipt points at an unknown event).
+* *(event/reply)* Changed plaintext reply fallback removal to only happen when
+  an HTML reply fallback is removed successfully.
+* *(bridgev2/matrix)* Fixed unnecessary sleep after registering bot on first run.
+* *(crypto/goolm)* Fixed panic when processing certain malformed Olm messages.
+* *(federation)* Fixed HTTP method for sending transactions
+  (thanks to [@nexy7574] in [#426]).
+* *(federation)* Fixed response body being closed even when using `DontReadBody`
+  parameter.
+* *(federation)* Fixed validating auth for requests with query params.
+* *(federation/eventauth)* Fixed typo causing restricted joins to not work.
+
+[MSC4169]: https://github.com/matrix-org/matrix-spec-proposals/pull/4169
+[#411]: github.com/mautrix/go/pull/411
+[#420]: github.com/mautrix/go/pull/420
+[#426]: github.com/mautrix/go/pull/426
+
 ## v0.25.2 (2025-10-16)
 
 * **Breaking change *(id)*** Split `UserID.ParseAndValidate` into
@@ -310,6 +437,7 @@
 [MSC4156]: https://github.com/matrix-org/matrix-spec-proposals/pull/4156
 [MSC4190]: https://github.com/matrix-org/matrix-spec-proposals/pull/4190
 [#288]: https://github.com/mautrix/go/pull/288
+[@onestacked]: https://github.com/onestacked
 
 ## v0.22.0 (2024-11-16)
 

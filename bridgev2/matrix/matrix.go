@@ -68,6 +68,10 @@ func (br *Connector) handleEphemeralEvent(ctx context.Context, evt *event.Event)
 	case event.EphemeralEventTyping:
 		typingContent := evt.Content.AsTyping()
 		typingContent.UserIDs = slices.DeleteFunc(typingContent.UserIDs, br.shouldIgnoreEventFromUser)
+	case event.BeeperEphemeralEventAIStream:
+		if br.shouldIgnoreEvent(evt) {
+			return
+		}
 	}
 	br.Bridge.QueueMatrixEvent(ctx, evt)
 }
@@ -127,6 +131,7 @@ func (br *Connector) waitLongerForSession(ctx context.Context, evt *event.Event,
 		Int("wait_seconds", int(extendedSessionWaitTimeout.Seconds())).
 		Msg("Couldn't find session, requesting keys and waiting longer...")
 
+	//lint:ignore SA1019 RequestSession will gracefully request from all devices if DeviceID is blank
 	go br.Crypto.RequestSession(ctx, evt.RoomID, content.SenderKey, content.SessionID, evt.Sender, content.DeviceID)
 	go br.sendCryptoStatusError(ctx, evt, fmt.Errorf("%w. The bridge will retry for %d seconds", errNoDecryptionKeys, int(extendedSessionWaitTimeout.Seconds())), errorEventID, 1, false)
 
@@ -230,7 +235,6 @@ func (br *Connector) postDecrypt(ctx context.Context, original, decrypted *event
 	go br.sendSuccessCheckpoint(ctx, decrypted, status.MsgStepDecrypted, retryCount)
 	decrypted.Mautrix.CheckpointSent = true
 	decrypted.Mautrix.DecryptionDuration = duration
-	decrypted.Mautrix.EventSource |= event.SourceDecrypted
 	br.EventProcessor.Dispatch(ctx, decrypted)
 	if errorEventID != nil && *errorEventID != "" {
 		_, _ = br.Bot.RedactEvent(ctx, decrypted.RoomID, *errorEventID)

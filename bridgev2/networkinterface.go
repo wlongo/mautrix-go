@@ -18,6 +18,7 @@ import (
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/random"
 
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
@@ -260,6 +261,7 @@ type NetworkConnector interface {
 }
 
 type StoppableNetwork interface {
+	NetworkConnector
 	// Stop is called when the bridge is stopping, after all network clients have been disconnected.
 	Stop()
 }
@@ -314,6 +316,16 @@ type ConfigValidatingNetwork interface {
 type MaxFileSizeingNetwork interface {
 	NetworkConnector
 	SetMaxFileSize(maxSize int64)
+}
+
+type NetworkResettingNetwork interface {
+	NetworkConnector
+	// ResetHTTPTransport should recreate the HTTP client used by the bridge.
+	// It should refetch settings from the Matrix connector using GetHTTPClientSettings if applicable.
+	ResetHTTPTransport()
+	// ResetNetworkConnections should forcefully disconnect and restart any persistent network connections.
+	// ResetHTTPTransport will usually be called before this, so resetting the transport is not necessary here.
+	ResetNetworkConnections()
 }
 
 type RemoteEchoHandler func(RemoteMessage, *database.Message) (bool, error)
@@ -706,6 +718,19 @@ type DeleteChatHandlingNetworkAPI interface {
 	HandleMatrixDeleteChat(ctx context.Context, msg *MatrixDeleteChat) error
 }
 
+// MessageRequestAcceptingNetworkAPI is an optional interface that network connectors
+// can implement to accept message requests from the remote network.
+type MessageRequestAcceptingNetworkAPI interface {
+	NetworkAPI
+	// HandleMatrixAcceptMessageRequest is called when the user accepts a message request.
+	HandleMatrixAcceptMessageRequest(ctx context.Context, msg *MatrixAcceptMessageRequest) error
+}
+
+type BeeperAIStreamHandlingNetworkAPI interface {
+	NetworkAPI
+	HandleMatrixBeeperAIStream(ctx context.Context, msg *MatrixBeeperAIStream) error
+}
+
 type ResolveIdentifierResponse struct {
 	// Ghost is the ghost of the user that the identifier resolves to.
 	// This field should be set whenever possible. However, it is not required,
@@ -776,6 +801,16 @@ type ContactListingNetworkAPI interface {
 type UserSearchingNetworkAPI interface {
 	IdentifierResolvingNetworkAPI
 	SearchUsers(ctx context.Context, query string) ([]*ResolveIdentifierResponse, error)
+}
+
+type GroupCreatingNetworkAPI interface {
+	IdentifierResolvingNetworkAPI
+	CreateGroup(ctx context.Context, params *GroupCreateParams) (*CreateChatResponse, error)
+}
+
+type PersonalFilteringCustomizingNetworkAPI interface {
+	NetworkAPI
+	CustomizePersonalFilteringSpace(req *mautrix.ReqCreateRoom)
 }
 
 type ProvisioningCapabilities struct {
@@ -849,11 +884,6 @@ type GroupCreateParams struct {
 	RoomID id.RoomID `json:"room_id,omitempty"`
 }
 
-type GroupCreatingNetworkAPI interface {
-	IdentifierResolvingNetworkAPI
-	CreateGroup(ctx context.Context, params *GroupCreateParams) (*CreateChatResponse, error)
-}
-
 type MembershipChangeType struct {
 	From   event.Membership
 	To     event.Membership
@@ -891,16 +921,15 @@ type MatrixMembershipChange struct {
 	MatrixRoomMeta[*event.MemberEventContent]
 	Target GhostOrUserLogin
 	Type   MembershipChangeType
+}
 
-	// Deprecated: Use Target instead
-	TargetGhost *Ghost
-	// Deprecated: Use Target instead
-	TargetUserLogin *UserLogin
+type MatrixMembershipResult struct {
+	RedirectTo networkid.UserID
 }
 
 type MembershipHandlingNetworkAPI interface {
 	NetworkAPI
-	HandleMatrixMembership(ctx context.Context, msg *MatrixMembershipChange) (bool, error)
+	HandleMatrixMembership(ctx context.Context, msg *MatrixMembershipChange) (*MatrixMembershipResult, error)
 }
 
 type SinglePowerLevelChange struct {
@@ -1376,7 +1405,8 @@ type MatrixMessageRemove struct {
 
 type MatrixRoomMeta[ContentType any] struct {
 	MatrixEventBase[ContentType]
-	PrevContent ContentType
+	PrevContent    ContentType
+	IsStateRequest bool
 }
 
 type MatrixRoomName = MatrixRoomMeta[*event.RoomNameEventContent]
@@ -1413,6 +1443,8 @@ type MatrixViewingChat struct {
 }
 
 type MatrixDeleteChat = MatrixEventBase[*event.BeeperChatDeleteEventContent]
+type MatrixAcceptMessageRequest = MatrixEventBase[*event.BeeperAcceptMessageRequestEventContent]
+type MatrixBeeperAIStream = MatrixEventBase[*event.BeeperAIStreamEventContent]
 type MatrixMarkedUnread = MatrixRoomMeta[*event.MarkedUnreadEventContent]
 type MatrixMute = MatrixRoomMeta[*event.BeeperMuteEventContent]
 type MatrixRoomTag = MatrixRoomMeta[*event.TagEventContent]

@@ -484,7 +484,7 @@ func authorizeMember(roomVersion id.RoomVersion, evt, createEvt *pdu.PDU, authEv
 			}
 			return ErrCantLeaveWithoutBeingInRoom
 		}
-		if senderMembership != event.MembershipLeave {
+		if senderMembership != event.MembershipJoin {
 			// 5.5.2. If the sender’s current membership state is not join, reject.
 			return ErrCantKickWithoutBeingInRoom
 		}
@@ -505,7 +505,7 @@ func authorizeMember(roomVersion id.RoomVersion, evt, createEvt *pdu.PDU, authEv
 		// 5.5.5. Otherwise, reject.
 		return ErrInsufficientPermissionForKick
 	case event.MembershipBan:
-		if senderMembership != event.MembershipLeave {
+		if senderMembership != event.MembershipJoin {
 			// 5.6.1. If the sender’s current membership state is not join, reject.
 			return ErrCantBanWithoutBeingInRoom
 		}

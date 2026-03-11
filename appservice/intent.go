@@ -51,7 +51,7 @@ func (as *AppService) NewIntentAPI(localpart string) *IntentAPI {
 }
 
 func (intent *IntentAPI) Register(ctx context.Context) error {
-	_, err := intent.Client.MakeRequest(ctx, http.MethodPost, intent.BuildClientURL("v3", "register"), &mautrix.ReqRegister{
+	_, err := intent.Client.MakeRequest(ctx, http.MethodPost, intent.BuildClientURL("v3", "register"), &mautrix.ReqRegister[any]{
 		Username:     intent.Localpart,
 		Type:         mautrix.AuthTypeAppservice,
 		InhibitLogin: true,
@@ -214,23 +214,31 @@ func (intent *IntentAPI) AddDoublePuppetValueWithTS(into any, ts int64) any {
 	}
 }
 
-func (intent *IntentAPI) SendMessageEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, contentJSON interface{}) (*mautrix.RespSendEvent, error) {
+func (intent *IntentAPI) SendMessageEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, contentJSON any, extra ...mautrix.ReqSendEvent) (*mautrix.RespSendEvent, error) {
 	if err := intent.EnsureJoined(ctx, roomID); err != nil {
 		return nil, err
 	}
 	contentJSON = intent.AddDoublePuppetValue(contentJSON)
-	return intent.Client.SendMessageEvent(ctx, roomID, eventType, contentJSON)
+	return intent.Client.SendMessageEvent(ctx, roomID, eventType, contentJSON, extra...)
 }
 
-func (intent *IntentAPI) SendMassagedMessageEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, contentJSON interface{}, ts int64) (*mautrix.RespSendEvent, error) {
+func (intent *IntentAPI) BeeperSendEphemeralEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, contentJSON any, extra ...mautrix.ReqSendEvent) (*mautrix.RespSendEvent, error) {
 	if err := intent.EnsureJoined(ctx, roomID); err != nil {
 		return nil, err
 	}
-	contentJSON = intent.AddDoublePuppetValueWithTS(contentJSON, ts)
-	return intent.Client.SendMessageEvent(ctx, roomID, eventType, contentJSON, mautrix.ReqSendEvent{Timestamp: ts})
+	if !intent.SpecVersions.Supports(mautrix.BeeperFeatureEphemeralEvents) {
+		return nil, mautrix.MUnrecognized.WithMessage("Homeserver does not advertise com.beeper.ephemeral support")
+	}
+	contentJSON = intent.AddDoublePuppetValue(contentJSON)
+	return intent.Client.BeeperSendEphemeralEvent(ctx, roomID, eventType, contentJSON, extra...)
 }
 
-func (intent *IntentAPI) SendStateEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string, contentJSON interface{}) (*mautrix.RespSendEvent, error) {
+// Deprecated: use SendMessageEvent with mautrix.ReqSendEvent.Timestamp instead
+func (intent *IntentAPI) SendMassagedMessageEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, contentJSON interface{}, ts int64) (*mautrix.RespSendEvent, error) {
+	return intent.SendMessageEvent(ctx, roomID, eventType, contentJSON, mautrix.ReqSendEvent{Timestamp: ts})
+}
+
+func (intent *IntentAPI) SendStateEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string, contentJSON any, extra ...mautrix.ReqSendEvent) (*mautrix.RespSendEvent, error) {
 	if eventType != event.StateMember || stateKey != string(intent.UserID) {
 		if err := intent.EnsureJoined(ctx, roomID); err != nil {
 			return nil, err
@@ -239,15 +247,12 @@ func (intent *IntentAPI) SendStateEvent(ctx context.Context, roomID id.RoomID, e
 		return nil, err
 	}
 	contentJSON = intent.AddDoublePuppetValue(contentJSON)
-	return intent.Client.SendStateEvent(ctx, roomID, eventType, stateKey, contentJSON)
+	return intent.Client.SendStateEvent(ctx, roomID, eventType, stateKey, contentJSON, extra...)
 }
 
+// Deprecated: use SendStateEvent with mautrix.ReqSendEvent.Timestamp instead
 func (intent *IntentAPI) SendMassagedStateEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string, contentJSON interface{}, ts int64) (*mautrix.RespSendEvent, error) {
-	if err := intent.EnsureJoined(ctx, roomID); err != nil {
-		return nil, err
-	}
-	contentJSON = intent.AddDoublePuppetValueWithTS(contentJSON, ts)
-	return intent.Client.SendMassagedStateEvent(ctx, roomID, eventType, stateKey, contentJSON, ts)
+	return intent.SendStateEvent(ctx, roomID, eventType, stateKey, contentJSON, mautrix.ReqSendEvent{Timestamp: ts})
 }
 
 func (intent *IntentAPI) StateEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string, outContent interface{}) error {

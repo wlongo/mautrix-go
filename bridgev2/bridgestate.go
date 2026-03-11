@@ -22,6 +22,8 @@ import (
 	"maunium.net/go/mautrix/format"
 )
 
+var CatchBridgeStateQueuePanics = true
+
 type BridgeStateQueue struct {
 	prevUnsent *status.BridgeState
 	prevSent   *status.BridgeState
@@ -35,6 +37,8 @@ type BridgeStateQueue struct {
 
 	stopChan      chan struct{}
 	stopReconnect atomic.Pointer[context.CancelFunc]
+
+	unknownErrorReconnects int
 }
 
 func (br *Bridge) SendGlobalBridgeState(state status.BridgeState) {
@@ -84,23 +88,25 @@ func (bsq *BridgeStateQueue) StopUnknownErrorReconnect() {
 }
 
 func (bsq *BridgeStateQueue) loop() {
-	defer func() {
-		err := recover()
-		if err != nil {
-			bsq.login.Log.Error().
-				Bytes(zerolog.ErrorStackFieldName, debug.Stack()).
-				Any(zerolog.ErrorFieldName, err).
-				Msg("Panic in bridge state loop")
-		}
-	}()
+	if CatchBridgeStateQueuePanics {
+		defer func() {
+			err := recover()
+			if err != nil {
+				bsq.login.Log.Error().
+					Bytes(zerolog.ErrorStackFieldName, debug.Stack()).
+					Any(zerolog.ErrorFieldName, err).
+					Msg("Panic in bridge state loop")
+			}
+		}()
+	}
 	for state := range bsq.ch {
 		bsq.immediateSendBridgeState(state)
 	}
 }
 
-func (bsq *BridgeStateQueue) scheduleNotice(ctx context.Context, triggeredBy status.BridgeState) {
+func (bsq *BridgeStateQueue) scheduleNotice(triggeredBy status.BridgeState) {
 	log := bsq.login.Log.With().Str("action", "transient disconnect notice").Logger()
-	ctx = log.WithContext(bsq.bridge.BackgroundCtx)
+	ctx := log.WithContext(bsq.bridge.BackgroundCtx)
 	if !bsq.waitForTransientDisconnectReconnect(ctx) {
 		return
 	}
@@ -131,7 +137,7 @@ func (bsq *BridgeStateQueue) sendNotice(ctx context.Context, state status.Bridge
 			if bsq.firstTransientDisconnect.IsZero() {
 				bsq.firstTransientDisconnect = time.Now()
 			}
-			go bsq.scheduleNotice(ctx, state)
+			go bsq.scheduleNotice(state)
 		}
 		return
 	}
@@ -188,8 +194,14 @@ func (bsq *BridgeStateQueue) unknownErrorReconnect(triggeredBy status.BridgeStat
 	} else if prevUnsent.StateEvent != status.StateUnknownError || prev.StateEvent != status.StateUnknownError {
 		log.Debug().Msg("Not reconnecting as the previous state was not an unknown error")
 		return
+	} else if bsq.unknownErrorReconnects > bsq.bridge.Config.UnknownErrorMaxAutoReconnects {
+		log.Warn().Msg("Not reconnecting as the maximum number of unknown error reconnects has been reached")
+		return
 	}
-	log.Info().Msg("Disconnecting and reconnecting login due to unknown error")
+	bsq.unknownErrorReconnects++
+	log.Info().
+		Int("reconnect_num", bsq.unknownErrorReconnects).
+		Msg("Disconnecting and reconnecting login due to unknown error")
 	bsq.login.Disconnect()
 	log.Debug().Msg("Disconnection finished, recreating client and reconnecting")
 	err := bsq.login.recreateClient(ctx)

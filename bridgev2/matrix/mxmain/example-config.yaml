@@ -29,6 +29,9 @@ bridge:
     # How long after an unknown error should the bridge attempt a full reconnect?
     # Must be at least 1 minute. The bridge will add an extra ±20% jitter to this value.
     unknown_error_auto_reconnect: null
+    # Maximum number of times to do the auto-reconnect above.
+    # The counter is per login, but is never reset except on logout and restart.
+    unknown_error_max_auto_reconnects: 10
 
     # Should leaving Matrix rooms be bridged as leaving groups on the remote network?
     bridge_matrix_leave: false
@@ -49,6 +52,9 @@ bridge:
     cross_room_replies: false
     # If a state event fails to bridge, should the bridge revert any state changes made by that event?
     revert_failed_state_changes: false
+    # In portals with no relay set, should Matrix users be kicked if they're
+    # not logged into an account that's in the remote chat?
+    kick_matrix_users: true
 
     # What should be done to portal rooms when a user logs out or is logged out?
     # Permitted values:
@@ -375,6 +381,8 @@ encryption:
     # Only relevant when using end-to-bridge encryption, required when using encryption with next-gen auth (MSC3861).
     # Changing this option requires updating the appservice registration file.
     msc4190: false
+    # Whether to encrypt reactions and reply metadata as per MSC4392.
+    msc4392: false
     # Should the bridge bot generate a recovery key and cross-signing keys and verify itself?
     # Note that without the latest version of MSC4190, this will fail if you reset the bridge database.
     # The generated recovery key will be saved in the kv_store table under `recovery_key`.
@@ -440,6 +448,16 @@ encryption:
         # Disable rotating keys when a user's devices change?
         # You should not enable this option unless you understand all the implications.
         disable_device_change_key_rotation: false
+
+# Prefix for environment variables. All variables with this prefix must map to valid config fields.
+# Nesting in variable names is represented with a dot (.).
+# If there are no dots in the name, two underscores (__) are replaced with a dot.
+#
+# e.g. if the prefix is set to `BRIDGE_`, then `BRIDGE_APPSERVICE__AS_TOKEN` will set appservice.as_token.
+# `BRIDGE_appservice.as_token` would work as well, but can't be set in a shell as easily.
+#
+# If this is null, reading config fields from environment will be disabled.
+env_config_prefix: null
 
 # Logging config. See https://github.com/tulir/zeroconfig for details.
 logging:

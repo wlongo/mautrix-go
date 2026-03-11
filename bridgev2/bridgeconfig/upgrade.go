@@ -33,6 +33,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "bridge", "no_bridge_info_state_key")
 	helper.Copy(up.Str|up.Null, "bridge", "bridge_status_notices")
 	helper.Copy(up.Str|up.Int|up.Null, "bridge", "unknown_error_auto_reconnect")
+	helper.Copy(up.Int, "bridge", "unknown_error_max_auto_reconnects")
 	helper.Copy(up.Bool, "bridge", "bridge_matrix_leave")
 	helper.Copy(up.Bool, "bridge", "bridge_notices")
 	helper.Copy(up.Bool, "bridge", "tag_only_on_create")
@@ -41,6 +42,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "bridge", "deduplicate_matrix_messages")
 	helper.Copy(up.Bool, "bridge", "cross_room_replies")
 	helper.Copy(up.Bool, "bridge", "revert_failed_state_changes")
+	helper.Copy(up.Bool, "bridge", "kick_matrix_users")
 	helper.Copy(up.Bool, "bridge", "cleanup_on_logout", "enabled")
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "manual", "private")
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "manual", "relayed")
@@ -160,6 +162,7 @@ func doUpgrade(helper up.Helper) {
 	} else {
 		helper.Copy(up.Bool, "encryption", "msc4190")
 	}
+	helper.Copy(up.Bool, "encryption", "msc4392")
 	helper.Copy(up.Bool, "encryption", "self_sign")
 	helper.Copy(up.Bool, "encryption", "allow_key_sharing")
 	if secret, ok := helper.Get(up.Str, "encryption", "pickle_key"); !ok || secret == "generate" {
@@ -182,6 +185,8 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Int, "encryption", "rotation", "milliseconds")
 	helper.Copy(up.Int, "encryption", "rotation", "messages")
 	helper.Copy(up.Bool, "encryption", "rotation", "disable_device_change_key_rotation")
+
+	helper.Copy(up.Str|up.Null, "env_config_prefix")
 
 	helper.Copy(up.Map, "logging")
 }
@@ -210,6 +215,7 @@ var SpacedBlocks = [][]string{
 	{"backfill"},
 	{"double_puppet"},
 	{"encryption"},
+	{"env_config_prefix"},
 	{"logging"},
 }
 

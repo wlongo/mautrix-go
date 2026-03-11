@@ -164,13 +164,16 @@ func (ul *UserLogin) GetSpaceRoom(ctx context.Context) (id.RoomID, error) {
 				ul.UserMXID:             50,
 			},
 		},
-		RoomVersion: id.RoomV11,
-		Invite:      []id.UserID{ul.UserMXID},
+		Invite: []id.UserID{ul.UserMXID},
 	}
 	if autoJoin {
 		req.BeeperInitialMembers = []id.UserID{ul.UserMXID}
 		// TODO remove this after initial_members is supported in hungryserv
 		req.BeeperAutoJoinInvites = true
+	}
+	pfc, ok := ul.Client.(PersonalFilteringCustomizingNetworkAPI)
+	if ok {
+		pfc.CustomizePersonalFilteringSpace(req)
 	}
 	ul.SpaceRoom, err = ul.Bridge.Bot.CreateRoom(ctx, req)
 	if err != nil {

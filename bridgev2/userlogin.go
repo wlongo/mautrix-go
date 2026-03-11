@@ -10,6 +10,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -50,6 +51,8 @@ func (br *Bridge) loadUserLogin(ctx context.Context, user *User, dbUserLogin *da
 		if err != nil {
 			return nil, fmt.Errorf("failed to get user: %w", err)
 		}
+		// TODO if loading the user caused the provided userlogin to be loaded, cancel here?
+		//      Currently this will double-load it
 	}
 	userLogin := &UserLogin{
 		UserLogin: dbUserLogin,
@@ -138,6 +141,12 @@ func (br *Bridge) GetCachedUserLoginByID(id networkid.UserLoginID) *UserLogin {
 	br.cacheLock.Lock()
 	defer br.cacheLock.Unlock()
 	return br.userLoginsByID[id]
+}
+
+func (br *Bridge) GetAllCachedUserLogins() (logins []*UserLogin) {
+	br.cacheLock.Lock()
+	defer br.cacheLock.Unlock()
+	return slices.Collect(maps.Values(br.userLoginsByID))
 }
 
 func (br *Bridge) GetCurrentBridgeStates() (states []status.BridgeState) {

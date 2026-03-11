@@ -32,21 +32,40 @@ func (br *Bridge) ReIDPortal(ctx context.Context, source, target networkid.Porta
 	if source == target {
 		return ReIDResultError, nil, fmt.Errorf("illegal re-ID call: source and target are the same")
 	}
-	log := zerolog.Ctx(ctx)
-	log.Debug().Msg("Re-ID'ing portal")
+	log := zerolog.Ctx(ctx).With().
+		Str("action", "re-id portal").
+		Stringer("source_portal_key", source).
+		Stringer("target_portal_key", target).
+		Logger()
+	ctx = log.WithContext(ctx)
 	defer func() {
 		log.Debug().Msg("Finished handling portal re-ID")
 	}()
-	br.cacheLock.Lock()
-	defer br.cacheLock.Unlock()
-	sourcePortal, err := br.UnlockedGetPortalByKey(ctx, source, true)
+	acquireCacheLock := func() {
+		if !br.cacheLock.TryLock() {
+			log.Debug().Msg("Waiting for global cache lock")
+			br.cacheLock.Lock()
+			log.Debug().Msg("Acquired global cache lock after waiting")
+		} else {
+			log.Trace().Msg("Acquired global cache lock without waiting")
+		}
+	}
+	log.Debug().Msg("Re-ID'ing portal")
+	sourcePortal, err := br.GetExistingPortalByKey(ctx, source)
 	if err != nil {
 		return ReIDResultError, nil, fmt.Errorf("failed to get source portal: %w", err)
 	} else if sourcePortal == nil {
 		log.Debug().Msg("Source portal not found, re-ID is no-op")
 		return ReIDResultNoOp, nil, nil
 	}
-	sourcePortal.roomCreateLock.Lock()
+	if !sourcePortal.roomCreateLock.TryLock() {
+		if cancelCreate := sourcePortal.cancelRoomCreate.Swap(nil); cancelCreate != nil {
+			(*cancelCreate)()
+		}
+		log.Debug().Msg("Waiting for source portal room creation lock")
+		sourcePortal.roomCreateLock.Lock()
+		log.Debug().Msg("Acquired source portal room creation lock after waiting")
+	}
 	defer sourcePortal.roomCreateLock.Unlock()
 	if sourcePortal.MXID == "" {
 		log.Info().Msg("Source portal doesn't have Matrix room, deleting row")
@@ -59,22 +78,37 @@ func (br *Bridge) ReIDPortal(ctx context.Context, source, target networkid.Porta
 	log.UpdateContext(func(c zerolog.Context) zerolog.Context {
 		return c.Stringer("source_portal_mxid", sourcePortal.MXID)
 	})
+
+	acquireCacheLock()
 	targetPortal, err := br.UnlockedGetPortalByKey(ctx, target, true)
 	if err != nil {
+		br.cacheLock.Unlock()
 		return ReIDResultError, nil, fmt.Errorf("failed to get target portal: %w", err)
 	}
 	if targetPortal == nil {
 		log.Info().Msg("Target portal doesn't exist, re-ID'ing source portal")
 		err = sourcePortal.unlockedReID(ctx, target)
+		br.cacheLock.Unlock()
 		if err != nil {
 			return ReIDResultError, nil, fmt.Errorf("failed to re-ID source portal: %w", err)
 		}
 		return ReIDResultSourceReIDd, sourcePortal, nil
 	}
-	targetPortal.roomCreateLock.Lock()
+	br.cacheLock.Unlock()
+
+	if !targetPortal.roomCreateLock.TryLock() {
+		if cancelCreate := targetPortal.cancelRoomCreate.Swap(nil); cancelCreate != nil {
+			(*cancelCreate)()
+		}
+		log.Debug().Msg("Waiting for target portal room creation lock")
+		targetPortal.roomCreateLock.Lock()
+		log.Debug().Msg("Acquired target portal room creation lock after waiting")
+	}
 	defer targetPortal.roomCreateLock.Unlock()
 	if targetPortal.MXID == "" {
 		log.Info().Msg("Target portal row exists, but doesn't have a Matrix room. Deleting target portal row and re-ID'ing source portal")
+		acquireCacheLock()
+		defer br.cacheLock.Unlock()
 		err = targetPortal.unlockedDelete(ctx)
 		if err != nil {
 			return ReIDResultError, nil, fmt.Errorf("failed to delete target portal: %w", err)
@@ -89,6 +123,9 @@ func (br *Bridge) ReIDPortal(ctx context.Context, source, target networkid.Porta
 			return c.Stringer("target_portal_mxid", targetPortal.MXID)
 		})
 		log.Info().Msg("Both target and source portals have Matrix rooms, tombstoning source portal")
+		sourcePortal.removeInPortalCache(ctx)
+		acquireCacheLock()
+		defer br.cacheLock.Unlock()
 		err = sourcePortal.unlockedDelete(ctx)
 		if err != nil {
 			return ReIDResultError, nil, fmt.Errorf("failed to delete source portal row: %w", err)
@@ -96,7 +133,7 @@ func (br *Bridge) ReIDPortal(ctx context.Context, source, target networkid.Porta
 		go func() {
 			_, err := br.Bot.SendState(ctx, sourcePortal.MXID, event.StateTombstone, "", &event.Content{
 				Parsed: &event.TombstoneEventContent{
-					Body:            fmt.Sprintf("This room has been merged"),
+					Body:            "This room has been merged",
 					ReplacementRoom: targetPortal.MXID,
 				},
 			}, time.Now())

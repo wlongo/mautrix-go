@@ -121,6 +121,7 @@ func fnLogin(ce *Event) {
 		ce.Reply("Failed to start login: %v", err)
 		return
 	}
+	ce.Log.Debug().Any("first_step", nextStep).Msg("Created login process")
 
 	nextStep = checkLoginCommandDirectParams(ce, login, nextStep)
 	if nextStep != nil {
@@ -251,14 +252,19 @@ func sendQR(ce *Event, qr string, prevEventID *id.EventID) error {
 		return fmt.Errorf("failed to upload image: %w", err)
 	}
 	content := &event.MessageEventContent{
-		MsgType:  event.MsgImage,
-		FileName: "qr.png",
-		URL:      qrMXC,
-		File:     qrFile,
-
+		MsgType:       event.MsgImage,
+		FileName:      "qr.png",
+		URL:           qrMXC,
+		File:          qrFile,
 		Body:          qr,
 		Format:        event.FormatHTML,
 		FormattedBody: fmt.Sprintf("<pre><code>%s</code></pre>", html.EscapeString(qr)),
+		Info: &event.FileInfo{
+			MimeType: "image/png",
+			Width:    qrSizePx,
+			Height:   qrSizePx,
+			Size:     len(qrData),
+		},
 	}
 	if *prevEventID != "" {
 		content.SetEdit(*prevEventID)
@@ -269,6 +275,36 @@ func sendQR(ce *Event, qr string, prevEventID *id.EventID) error {
 	}
 	if *prevEventID == "" {
 		*prevEventID = newEventID.EventID
+	}
+	return nil
+}
+
+func sendUserInputAttachments(ce *Event, atts []*bridgev2.LoginUserInputAttachment) error {
+	for _, att := range atts {
+		if att.FileName == "" {
+			return fmt.Errorf("missing attachment filename")
+		}
+		mxc, file, err := ce.Bot.UploadMedia(ce.Ctx, ce.RoomID, att.Content, att.FileName, att.Info.MimeType)
+		if err != nil {
+			return fmt.Errorf("failed to upload attachment %q: %w", att.FileName, err)
+		}
+		content := &event.MessageEventContent{
+			MsgType:  att.Type,
+			FileName: att.FileName,
+			URL:      mxc,
+			File:     file,
+			Info: &event.FileInfo{
+				MimeType: att.Info.MimeType,
+				Width:    att.Info.Width,
+				Height:   att.Info.Height,
+				Size:     att.Info.Size,
+			},
+			Body: att.FileName,
+		}
+		_, err = ce.Bot.SendMessage(ce.Ctx, ce.RoomID, event.EventMessage, &event.Content{Parsed: content}, nil)
+		if err != nil {
+			return nil
+		}
 	}
 	return nil
 }
@@ -464,6 +500,7 @@ func maybeURLDecodeCookie(val string, field *bridgev2.LoginCookieField) string {
 }
 
 func doLoginStep(ce *Event, login bridgev2.LoginProcess, step *bridgev2.LoginStep, override *bridgev2.UserLogin) {
+	ce.Log.Debug().Any("next_step", step).Msg("Got next login step")
 	if step.Instructions != "" {
 		ce.Reply(step.Instructions)
 	}
@@ -478,6 +515,10 @@ func doLoginStep(ce *Event, login bridgev2.LoginProcess, step *bridgev2.LoginSte
 			Override: override,
 		}).prompt(ce)
 	case bridgev2.LoginStepTypeUserInput:
+		err := sendUserInputAttachments(ce, step.UserInputParams.Attachments)
+		if err != nil {
+			ce.Reply("Failed to send attachments: %v", err)
+		}
 		(&userInputLoginCommandState{
 			Login:           login.(bridgev2.LoginProcessUserInput),
 			RemainingFields: step.UserInputParams.Fields,

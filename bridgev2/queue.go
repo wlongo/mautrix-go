@@ -67,6 +67,7 @@ var (
 	ErrEventSenderUserNotFound = WrapErrorInStatus(errors.New("sender not found for event")).WithIsCertain(true).WithErrorAsMessage()
 	ErrNoPermissionToInteract  = WrapErrorInStatus(errors.New("you don't have permission to send messages")).WithIsCertain(true).WithSendNotice(false).WithErrorAsMessage()
 	ErrNoPermissionForCommands = WrapErrorInStatus(WrapErrorInStatus(errors.New("you don't have permission to use commands")).WithIsCertain(true).WithSendNotice(false).WithErrorAsMessage())
+	ErrCantRelayStateRequest   = WrapErrorInStatus(errors.New("relayed users can't use beeper state requests")).WithIsCertain(true).WithErrorAsMessage()
 )
 
 func (br *Bridge) QueueMatrixEvent(ctx context.Context, evt *event.Event) EventHandlingResult {
@@ -159,10 +160,27 @@ type EventHandlingResult struct {
 	Ignored bool
 	Queued  bool
 
+	SkipStateEcho bool
+
 	// Error is an optional reason for failure. It is not required, Success may be false even without a specific error.
 	Error error
 	// Whether the Error should be sent as a MSS event.
 	SendMSS bool
+
+	// EventID from the network
+	EventID id.EventID
+	// Stream order from the network
+	StreamOrder int64
+}
+
+func (ehr EventHandlingResult) WithEventID(id id.EventID) EventHandlingResult {
+	ehr.EventID = id
+	return ehr
+}
+
+func (ehr EventHandlingResult) WithStreamOrder(order int64) EventHandlingResult {
+	ehr.StreamOrder = order
+	return ehr
 }
 
 func (ehr EventHandlingResult) WithError(err error) EventHandlingResult {
@@ -176,6 +194,11 @@ func (ehr EventHandlingResult) WithError(err error) EventHandlingResult {
 
 func (ehr EventHandlingResult) WithMSS() EventHandlingResult {
 	ehr.SendMSS = true
+	return ehr
+}
+
+func (ehr EventHandlingResult) WithSkipStateEcho(skip bool) EventHandlingResult {
+	ehr.SkipStateEcho = skip
 	return ehr
 }
 
@@ -197,7 +220,7 @@ func (ul *UserLogin) QueueRemoteEvent(evt RemoteEvent) EventHandlingResult {
 	return ul.Bridge.QueueRemoteEvent(ul, evt)
 }
 
-func (br *Bridge) QueueRemoteEvent(login *UserLogin, evt RemoteEvent) (res EventHandlingResult) {
+func (br *Bridge) QueueRemoteEvent(login *UserLogin, evt RemoteEvent) EventHandlingResult {
 	log := login.Log
 	ctx := log.WithContext(br.BackgroundCtx)
 	maybeUncertain, ok := evt.(RemoteEventWithUncertainPortalReceiver)
@@ -213,14 +236,14 @@ func (br *Bridge) QueueRemoteEvent(login *UserLogin, evt RemoteEvent) (res Event
 	if err != nil {
 		log.Err(err).Object("portal_key", key).Bool("uncertain_receiver", isUncertain).
 			Msg("Failed to get portal to handle remote event")
-		return
+		return EventHandlingResultFailed.WithError(fmt.Errorf("failed to get portal: %w", err))
 	} else if portal == nil {
 		log.Warn().
 			Stringer("event_type", evt.GetType()).
 			Object("portal_key", key).
 			Bool("uncertain_receiver", isUncertain).
 			Msg("Portal not found to handle remote event")
-		return
+		return EventHandlingResultFailed.WithError(ErrPortalNotFoundInEventHandler)
 	}
 	// TODO put this in a better place, and maybe cache to avoid constant db queries
 	login.MarkInPortal(ctx, portal)

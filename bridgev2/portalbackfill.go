@@ -194,6 +194,9 @@ func (portal *Portal) doThreadBackfill(ctx context.Context, source *UserLogin, t
 	if err != nil {
 		log.Err(err).Msg("Failed to get last thread message")
 		return
+	} else if anchorMessage == nil {
+		log.Warn().Msg("No messages found in thread?")
+		return
 	}
 	resp := portal.fetchThreadBackfill(ctx, source, anchorMessage)
 	if resp != nil {
@@ -394,6 +397,9 @@ func (portal *Portal) compileBatchMessage(ctx context.Context, source *UserLogin
 	}
 	slices.Sort(partIDs)
 	for _, reaction := range msg.Reactions {
+		if reaction == nil {
+			continue
+		}
 		reactionIntent, ok := portal.GetIntentFor(ctx, reaction.Sender, source, RemoteEventReactionRemove)
 		if !ok {
 			continue
@@ -404,6 +410,7 @@ func (portal *Portal) compileBatchMessage(ctx context.Context, source *UserLogin
 		if reaction.Timestamp.IsZero() {
 			reaction.Timestamp = msg.Timestamp.Add(10 * time.Millisecond)
 		}
+		//lint:ignore SA4006 it's a todo
 		targetPart, ok := partMap[*reaction.TargetPart]
 		if !ok {
 			// TODO warning log and/or skip reaction?
