@@ -1,0 +1,8 @@
+* mautrix-go (WL) MonkeyPatch Version:
+
+mautrix-go Project ( embedded git repository on the mod folder inside mautrix-wbatsapp git repository ) 
+
+Files ChangeLog: 
+11/03/2026 : bridgev2/portal.go   :   Message Removal Disabled
+
+
