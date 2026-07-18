@@ -40,6 +40,7 @@ var ErrDirectMediaNotEnabled = errors.New("direct media is not enabled")
 
 var ErrPortalIsDeleted = errors.New("portal is deleted")
 var ErrPortalNotFoundInEventHandler = errors.New("portal not found to handle remote event")
+var ErrSplitPortalMigrationFailed = errors.New("failed to migrate to split portals")
 
 // Common message status errors
 var (
@@ -57,6 +58,7 @@ var (
 	ErrEditTargetTooManyEdits           error = WrapErrorInStatus(errors.New("the message has been edited too many times")).WithIsCertain(true).WithErrorAsMessage().WithErrorReason(event.MessageStatusUnsupported)
 	ErrReactionsNotSupported            error = WrapErrorInStatus(errors.New("this bridge does not support reactions")).WithIsCertain(true).WithErrorAsMessage().WithErrorReason(event.MessageStatusUnsupported)
 	ErrPollsNotSupported                error = WrapErrorInStatus(errors.New("this bridge does not support polls")).WithIsCertain(true).WithErrorAsMessage().WithErrorReason(event.MessageStatusUnsupported)
+	ErrUnknownPoll                      error = WrapErrorInStatus(errors.New("vote target poll not found")).WithIsCertain(true).WithErrorAsMessage().WithErrorReason(event.MessageStatusUnsupported)
 	ErrRoomMetadataNotSupported         error = WrapErrorInStatus(errors.New("this bridge does not support changing room metadata")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(false).WithErrorReason(event.MessageStatusUnsupported)
 	ErrRoomMetadataNotAllowed           error = WrapErrorInStatus(errors.New("changes are not allowed here")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(false).WithErrorReason(event.MessageStatusUnsupported)
 	ErrRedactionsNotSupported           error = WrapErrorInStatus(errors.New("this bridge does not support deleting messages")).WithIsCertain(true).WithErrorAsMessage().WithErrorReason(event.MessageStatusUnsupported)
@@ -75,7 +77,6 @@ var (
 	ErrMediaConvertFailed               error = WrapErrorInStatus(errors.New("failed to convert media")).WithMessage("failed to convert media").WithIsCertain(true).WithSendNotice(true)
 	ErrMembershipNotSupported           error = WrapErrorInStatus(errors.New("this bridge does not support changing group membership")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(false).WithErrorReason(event.MessageStatusUnsupported)
 	ErrDeleteChatNotSupported           error = WrapErrorInStatus(errors.New("this bridge does not support deleting chats")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(false).WithErrorReason(event.MessageStatusUnsupported)
-	ErrBeeperAIStreamNotSupported       error = WrapErrorInStatus(errors.New("this bridge does not support Beeper AI stream events")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(false).WithErrorReason(event.MessageStatusUnsupported)
 	ErrPowerLevelsNotSupported          error = WrapErrorInStatus(errors.New("this bridge does not support changing group power levels")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(false).WithErrorReason(event.MessageStatusUnsupported)
 	ErrRemoteEchoTimeout                      = WrapErrorInStatus(errors.New("remote echo timed out")).WithIsCertain(false).WithSendNotice(true).WithErrorReason(event.MessageStatusTooOld)
 	ErrRemoteAckTimeout                       = WrapErrorInStatus(errors.New("remote ack timed out")).WithIsCertain(false).WithSendNotice(true).WithErrorReason(event.MessageStatusTooOld)
@@ -85,6 +86,9 @@ var (
 	ErrPublicMediaGenerateFailed   = WrapErrorInStatus(errors.New("failed to generate public media URL")).WithIsCertain(true).WithMessage("failed to generate public media URL").WithErrorReason(event.MessageStatusUnsupported).WithSendNotice(true)
 
 	ErrDisappearingTimerUnsupported error = WrapErrorInStatus(errors.New("invalid disappearing timer")).WithIsCertain(true)
+
+	ErrFailedToGetIntent   error = errors.New("failed to get intent for event")
+	ErrHandlerBackgrounded error = errors.New("event handling took too long and was backgrounded")
 )
 
 // Common login interface errors

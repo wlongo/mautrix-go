@@ -77,6 +77,9 @@ type EventSender struct {
 	// This only applies in DM rooms where [database.Portal.OtherUserID] is set and is ignored if IsFromMe is true.
 	// A warning will be logged if the sender is overridden due to this flag.
 	ForceDMUser bool
+
+	// Force using the original message sender to send the edit
+	ForceEditOrigSender bool
 }
 
 func (es EventSender) MarshalZerologObject(evt *zerolog.Event) {
@@ -413,6 +416,15 @@ type NetworkAPI interface {
 	HandleMatrixMessage(ctx context.Context, msg *MatrixMessage) (message *MatrixMessageResponse, err error)
 }
 
+// NetworkAPIWithUserID is an optional interface for fetching the remote user ID of the logged-in user.
+// Networks where such mapping is not possible should not implement this interface.
+// The GetUserID method may also return an empty string to indicate the user ID is not available.
+type NetworkAPIWithUserID interface {
+	NetworkAPI
+	// GetUserID returns the user ID of this client on the remote network.
+	GetUserID() networkid.UserID
+}
+
 type ConnectBackgroundParams struct {
 	// RawData is the raw data in the push that triggered the background connection.
 	RawData json.RawMessage
@@ -454,6 +466,10 @@ type FetchMessagesParams struct {
 	// The preferred number of messages to return. The returned batch can be bigger or smaller
 	// without any side effects, but the network connector should aim for this number.
 	Count int
+	// Whether the network connector should allow slow fetches of messages.
+	// If false and the network connector hits a case where a slow fetch is necessary,
+	// the response should set MoreRequiresSlowFetch in the response instead of fetching messages.
+	AllowSlowFetch bool
 
 	// When a forward backfill is triggered by a [RemoteChatResyncBackfillBundle], this will contain
 	// the bundled data returned by the event. It can be used as an optimization to avoid fetching
@@ -551,6 +567,14 @@ type FetchMessagesResponse struct {
 	// When sending forward backfill (or the first batch in a room), this field can be set
 	// to mark the messages as read immediately after backfilling.
 	MarkRead bool
+
+	// If further fetches require requests that take longer than normal message fetches, this can be set to true.
+	// The bridge will then skip this portal in the backfill queue and only paginate further if the user requests it.
+	// This should not be set if AllowSlowFetch is true in the fetch params.
+	MoreRequiresSlowFetch bool
+	// If a backfill event was requested in the background and will later be sent using RemoteBackfill,
+	// this should be set to true. The queue will suspend the task for at least 24 hours until the event.
+	Pending bool
 
 	// Should the bridge check each message against the database to ensure it's not a duplicate before bridging?
 	// By default, the bridge will only drop messages that are older than the last bridged message for forward backfills,
@@ -726,11 +750,6 @@ type MessageRequestAcceptingNetworkAPI interface {
 	HandleMatrixAcceptMessageRequest(ctx context.Context, msg *MatrixAcceptMessageRequest) error
 }
 
-type BeeperAIStreamHandlingNetworkAPI interface {
-	NetworkAPI
-	HandleMatrixBeeperAIStream(ctx context.Context, msg *MatrixBeeperAIStream) error
-}
-
 type ResolveIdentifierResponse struct {
 	// Ghost is the ghost of the user that the identifier resolves to.
 	// This field should be set whenever possible. However, it is not required,
@@ -816,6 +835,7 @@ type PersonalFilteringCustomizingNetworkAPI interface {
 type ProvisioningCapabilities struct {
 	ResolveIdentifier ResolveIdentifierCapabilities    `json:"resolve_identifier"`
 	GroupCreation     map[string]GroupTypeCapabilities `json:"group_creation"`
+	ImagePackImport   bool                             `json:"image_pack_import,omitempty"`
 }
 
 type ResolveIdentifierCapabilities struct {
@@ -900,7 +920,7 @@ var (
 	Kick          = MembershipChangeType{From: event.MembershipJoin, To: event.MembershipLeave}
 	BanJoined     = MembershipChangeType{From: event.MembershipJoin, To: event.MembershipBan}
 	Invite        = MembershipChangeType{From: event.MembershipLeave, To: event.MembershipInvite}
-	Join          = MembershipChangeType{From: event.MembershipLeave, To: event.MembershipJoin}
+	Join          = MembershipChangeType{From: event.MembershipLeave, To: event.MembershipJoin, IsSelf: true}
 	BanLeft       = MembershipChangeType{From: event.MembershipLeave, To: event.MembershipBan}
 	Knock         = MembershipChangeType{From: event.MembershipLeave, To: event.MembershipKnock, IsSelf: true}
 	AcceptKnock   = MembershipChangeType{From: event.MembershipKnock, To: event.MembershipInvite}
@@ -1044,6 +1064,23 @@ type PushParsingNetwork interface {
 	ParsePushNotification(ctx context.Context, data json.RawMessage) (networkid.UserLoginID, any, error)
 }
 
+type ImportedImagePack struct {
+	// The main content of the converted image pack
+	Content *event.ImagePackEventContent
+	// Extra top-level content
+	Extra map[string]any
+	// A unique identifier (within the network) for the image pack, used as the state key.
+	// If unset, falls back to Content.Metadata.BridgedPack.URL
+	Shortcode string
+}
+
+type StickerImportingNetworkAPI interface {
+	NetworkAPI
+
+	DownloadImagePack(ctx context.Context, url string) (*ImportedImagePack, error)
+	ListImagePacks(ctx context.Context) ([]*event.ImagePackMetadata, error)
+}
+
 type RemoteEventType int
 
 func (ret RemoteEventType) String() string {
@@ -1115,9 +1152,19 @@ type RemoteEvent interface {
 	GetSender() EventSender
 }
 
+type RemoteEventWithContextMutation interface {
+	RemoteEvent
+	MutateContext(ctx context.Context) context.Context
+}
+
 type RemoteEventWithUncertainPortalReceiver interface {
 	RemoteEvent
 	PortalReceiverIsUncertain() bool
+}
+
+type RemoteEventWithUncertainPortalReceiverFetcher interface {
+	RemoteEventWithUncertainPortalReceiver
+	FetchCertainPortalKey(context.Context) networkid.PortalKey
 }
 
 type RemotePreHandler interface {
@@ -1282,6 +1329,11 @@ type RemoteMessageRemove interface {
 	RemoteEventWithTargetMessage
 }
 
+type RemoteMessageRemoveWithoutPlaceholder interface {
+	RemoteMessageRemove
+	DontRenderPlaceholder() bool
+}
+
 // Deprecated: Renamed to RemoteReadReceipt.
 type RemoteReceipt = RemoteReadReceipt
 
@@ -1444,7 +1496,6 @@ type MatrixViewingChat struct {
 
 type MatrixDeleteChat = MatrixEventBase[*event.BeeperChatDeleteEventContent]
 type MatrixAcceptMessageRequest = MatrixEventBase[*event.BeeperAcceptMessageRequestEventContent]
-type MatrixBeeperAIStream = MatrixEventBase[*event.BeeperAIStreamEventContent]
 type MatrixMarkedUnread = MatrixRoomMeta[*event.MarkedUnreadEventContent]
 type MatrixMute = MatrixRoomMeta[*event.BeeperMuteEventContent]
 type MatrixRoomTag = MatrixRoomMeta[*event.TagEventContent]

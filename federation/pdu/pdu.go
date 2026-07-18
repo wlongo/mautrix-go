@@ -9,7 +9,6 @@
 package pdu
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -22,7 +21,6 @@ import (
 	"go.mau.fi/util/jsonbytes"
 	"go.mau.fi/util/ptr"
 
-	"maunium.net/go/mautrix/crypto/canonicaljson"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -120,6 +118,12 @@ func (pdu *PDU) ToClientEvent(roomVersion id.RoomVersion) (*event.Event, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal content: %w", err)
 	}
+	if len(pdu.Unsigned) > 0 {
+		err = json.Unmarshal(pdu.Unsigned, &evt.Unsigned)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal unsigned content: %w", err)
+		}
+	}
 	return evt, nil
 }
 
@@ -134,23 +138,4 @@ func (pdu *PDU) AddSignature(serverName string, keyID id.KeyID, signature string
 		pdu.Signatures[serverName] = make(map[id.KeyID]string)
 	}
 	pdu.Signatures[serverName][keyID] = signature
-}
-
-func marshalCanonical(data any) (jsontext.Value, error) {
-	marshaledBytes, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
-	}
-	marshaled := jsontext.Value(marshaledBytes)
-	err = marshaled.Canonicalize()
-	if err != nil {
-		return nil, err
-	}
-	check := canonicaljson.CanonicalJSONAssumeValid(marshaled)
-	if !bytes.Equal(marshaled, check) {
-		fmt.Println(string(marshaled))
-		fmt.Println(string(check))
-		return nil, fmt.Errorf("canonical JSON mismatch for %s", string(marshaled))
-	}
-	return marshaled, nil
 }

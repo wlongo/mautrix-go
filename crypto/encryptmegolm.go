@@ -197,18 +197,28 @@ func (mach *OlmMachine) newOutboundGroupSession(ctx context.Context, roomID id.R
 			Msg("Failed to get encryption event in room")
 		return nil, fmt.Errorf("failed to get encryption event in room %s: %w", roomID, err)
 	}
-	session, err := NewOutboundGroupSession(roomID, encryptionEvent)
+	historyVisibility, err := mach.StateStore.GetHistoryVisibility(ctx, roomID)
+	if err != nil {
+		mach.machOrContextLog(ctx).Err(err).
+			Stringer("room_id", roomID).
+			Msg("Failed to get history visibility in room")
+		return nil, fmt.Errorf("failed to get history visibility in room %s: %w", roomID, err)
+	}
+	session, err := NewOutboundGroupSession(roomID, encryptionEvent, historyVisibility)
 	if err != nil {
 		return nil, err
 	}
 	if !mach.DontStoreOutboundKeys {
 		signingKey, idKey := mach.account.Keys()
-		err := mach.createGroupSession(ctx, idKey, signingKey, roomID, session.ID(), session.Internal.Key(), session.MaxAge, session.MaxMessages, false)
+		err = mach.createGroupSession(
+			ctx, mach.Client.UserID, idKey, signingKey, roomID, session.ID(), session.Internal.Key(),
+			session.MaxAge, session.MaxMessages, session.SharedHistory, false,
+		)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return session, err
+	return session, nil
 }
 
 type deviceSessionWrapper struct {
@@ -251,6 +261,7 @@ func (mach *OlmMachine) ShareGroupSession(ctx context.Context, roomID id.RoomID,
 	missingUserSessions := make(map[id.DeviceID]*id.Device)
 	var fetchKeysForUsers []id.UserID
 
+	// TODO check crypto_tracked_users to see if any device lists are outdated
 	for _, userID := range users {
 		log := log.With().Stringer("target_user_id", userID).Logger()
 		devices, err := mach.CryptoStore.GetDevices(ctx, userID)

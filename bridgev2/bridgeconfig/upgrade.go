@@ -43,6 +43,8 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "bridge", "cross_room_replies")
 	helper.Copy(up.Bool, "bridge", "revert_failed_state_changes")
 	helper.Copy(up.Bool, "bridge", "kick_matrix_users")
+	helper.Copy(up.Bool, "bridge", "enable_send_state_requests")
+	helper.Copy(up.Bool, "bridge", "phone_numbers_in_profile")
 	helper.Copy(up.Bool, "bridge", "cleanup_on_logout", "enabled")
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "manual", "private")
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "manual", "relayed")
@@ -54,9 +56,14 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "bad_credentials", "shared_has_users")
 	helper.Copy(up.Bool, "bridge", "relay", "enabled")
 	helper.Copy(up.Bool, "bridge", "relay", "admin_only")
+	helper.Copy(up.Bool, "bridge", "relay", "prefer_default")
+	helper.Copy(up.Bool, "bridge", "relay", "allow_bridge")
 	helper.Copy(up.List, "bridge", "relay", "default_relays")
 	helper.Copy(up.Map, "bridge", "relay", "message_formats")
 	helper.Copy(up.Str, "bridge", "relay", "displayname_format")
+	helper.Copy(up.Str, "bridge", "portal_create_filter", "mode")
+	helper.Copy(up.List, "bridge", "portal_create_filter", "list")
+	helper.Copy(up.List, "bridge", "portal_create_filter", "always_deny_from_login")
 	helper.Copy(up.Map, "bridge", "permissions")
 
 	if dbType, ok := helper.Get(up.Str, "database", "type"); ok && dbType == "sqlite3" {
@@ -80,6 +87,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Str|up.Null, "homeserver", "websocket_proxy")
 	helper.Copy(up.Bool, "homeserver", "websocket")
 	helper.Copy(up.Int, "homeserver", "ping_interval_seconds")
+	helper.Copy(up.Int, "homeserver", "retry_limit")
 
 	helper.Copy(up.Str|up.Null, "appservice", "address")
 	helper.Copy(up.Str|up.Null, "appservice", "public_address")
@@ -101,6 +109,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "matrix", "sync_direct_chat_list")
 	helper.Copy(up.Bool, "matrix", "federate_rooms")
 	helper.Copy(up.Int, "matrix", "upload_file_threshold")
+	helper.Copy(up.Bool, "matrix", "ghost_extra_profile_info")
 
 	helper.Copy(up.Str|up.Null, "analytics", "token")
 	helper.Copy(up.Str|up.Null, "analytics", "url")
@@ -112,8 +121,10 @@ func doUpgrade(helper up.Helper) {
 	} else {
 		helper.Copy(up.Str, "provisioning", "shared_secret")
 	}
+	helper.Copy(up.Bool, "provisioning", "allow_matrix_auth")
 	helper.Copy(up.Bool, "provisioning", "debug_endpoints")
 	helper.Copy(up.Bool, "provisioning", "enable_session_transfers")
+	helper.Copy(up.Bool, "provisioning", "fail_on_webauthn")
 
 	helper.Copy(up.Bool, "direct_media", "enabled")
 	helper.Copy(up.Str|up.Null, "direct_media", "media_id_prefix")
@@ -144,6 +155,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Int, "backfill", "unread_hours_threshold")
 	helper.Copy(up.Int, "backfill", "threads", "max_initial_messages")
 	helper.Copy(up.Bool, "backfill", "queue", "enabled")
+	helper.Copy(up.Bool, "backfill", "queue", "manual")
 	helper.Copy(up.Int, "backfill", "queue", "batch_size")
 	helper.Copy(up.Int, "backfill", "queue", "batch_delay")
 	helper.Copy(up.Int, "backfill", "queue", "max_batches")
@@ -165,6 +177,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "encryption", "msc4392")
 	helper.Copy(up.Bool, "encryption", "self_sign")
 	helper.Copy(up.Bool, "encryption", "allow_key_sharing")
+	helper.Copy(up.Bool, "encryption", "plaintext_mentions")
 	if secret, ok := helper.Get(up.Str, "encryption", "pickle_key"); !ok || secret == "generate" {
 		helper.Set(up.Str, random.String(64), "encryption", "pickle_key")
 	} else {
@@ -196,6 +209,7 @@ var SpacedBlocks = [][]string{
 	{"bridge", "bridge_matrix_leave"},
 	{"bridge", "cleanup_on_logout"},
 	{"bridge", "relay"},
+	{"bridge", "portal_create_filter"},
 	{"bridge", "permissions"},
 	{"database"},
 	{"homeserver"},

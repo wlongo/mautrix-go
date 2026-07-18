@@ -117,12 +117,20 @@ func (portal *PortalInternals) HandleMatrixEdit(ctx context.Context, sender *Use
 	return (*Portal)(portal).handleMatrixEdit(ctx, sender, origSender, evt, content, caps)
 }
 
-func (portal *PortalInternals) HandleMatrixReaction(ctx context.Context, sender *UserLogin, evt *event.Event) EventHandlingResult {
+func (portal *PortalInternals) HandleMatrixReaction(ctx context.Context, sender *UserLogin, evt *event.Event) (handleRes EventHandlingResult) {
 	return (*Portal)(portal).handleMatrixReaction(ctx, sender, evt)
 }
 
 func (portal *PortalInternals) GetTargetUser(ctx context.Context, userID id.UserID) (GhostOrUserLogin, error) {
 	return (*Portal)(portal).getTargetUser(ctx, userID)
+}
+
+func (portal *PortalInternals) HandleMatrixAcceptMessageRequest(ctx context.Context, sender *UserLogin, origSender *OrigSender, evt *event.Event) EventHandlingResult {
+	return (*Portal)(portal).handleMatrixAcceptMessageRequest(ctx, sender, origSender, evt)
+}
+
+func (portal *PortalInternals) AutoAcceptMessageRequest(ctx context.Context, evt *event.Event, sender *UserLogin, origSender *OrigSender, caps *event.RoomFeatures) error {
+	return (*Portal)(portal).autoAcceptMessageRequest(ctx, evt, sender, origSender, caps)
 }
 
 func (portal *PortalInternals) HandleMatrixDeleteChat(ctx context.Context, sender *UserLogin, origSender *OrigSender, evt *event.Event) EventHandlingResult {
@@ -229,8 +237,8 @@ func (portal *PortalInternals) HandleRemoteMessageRemove(ctx context.Context, so
 	return (*Portal)(portal).handleRemoteMessageRemove(ctx, source, evt)
 }
 
-func (portal *PortalInternals) RedactMessageParts(ctx context.Context, parts []*database.Message, intent MatrixAPI, ts time.Time) EventHandlingResult {
-	return (*Portal)(portal).redactMessageParts(ctx, parts, intent, ts)
+func (portal *PortalInternals) RedactMessageParts(ctx context.Context, parts []*database.Message, intent MatrixAPI, ts time.Time, reason string, dontRenderPlaceholder bool) EventHandlingResult {
+	return (*Portal)(portal).redactMessageParts(ctx, parts, intent, ts, reason, dontRenderPlaceholder)
 }
 
 func (portal *PortalInternals) HandleRemoteReadReceipt(ctx context.Context, source *UserLogin, evt RemoteReadReceipt) EventHandlingResult {
@@ -263,10 +271,6 @@ func (portal *PortalInternals) FindOtherLogins(ctx context.Context, source *User
 
 func (portal *PortalInternals) HandleRemoteChatDelete(ctx context.Context, source *UserLogin, evt RemoteChatDelete) EventHandlingResult {
 	return (*Portal)(portal).handleRemoteChatDelete(ctx, source, evt)
-}
-
-func (portal *PortalInternals) HandleRemoteBackfill(ctx context.Context, source *UserLogin, backfill RemoteBackfill) (res EventHandlingResult) {
-	return (*Portal)(portal).handleRemoteBackfill(ctx, source, backfill)
 }
 
 func (portal *PortalInternals) UpdateName(ctx context.Context, name string, sender MatrixAPI, ts time.Time, excludeFromTimeline bool) bool {
@@ -337,6 +341,14 @@ func (portal *PortalInternals) AddToUserSpaces(ctx context.Context) {
 	(*Portal)(portal).addToUserSpaces(ctx)
 }
 
+func (portal *PortalInternals) SafeDBDelete(ctx context.Context) error {
+	return (*Portal)(portal).safeDBDelete(ctx)
+}
+
+func (portal *PortalInternals) RemoveMXID(ctx context.Context, alreadyLocked bool) error {
+	return (*Portal)(portal).removeMXID(ctx, alreadyLocked)
+}
+
 func (portal *PortalInternals) RemoveInPortalCache(ctx context.Context) {
 	(*Portal)(portal).removeInPortalCache(ctx)
 }
@@ -353,20 +365,24 @@ func (portal *PortalInternals) DoForwardBackfill(ctx context.Context, source *Us
 	(*Portal)(portal).doForwardBackfill(ctx, source, lastMessage, bundledData)
 }
 
+func (portal *PortalInternals) DoBackwardsBackfill(ctx context.Context, source *UserLogin, task *database.BackfillTask, resp *FetchMessagesResponse) (bool, error) {
+	return (*Portal)(portal).doBackwardsBackfill(ctx, source, task, resp)
+}
+
 func (portal *PortalInternals) FetchThreadBackfill(ctx context.Context, source *UserLogin, anchor *database.Message) *FetchMessagesResponse {
 	return (*Portal)(portal).fetchThreadBackfill(ctx, source, anchor)
 }
 
-func (portal *PortalInternals) DoThreadBackfill(ctx context.Context, source *UserLogin, threadID networkid.MessageID) {
-	(*Portal)(portal).doThreadBackfill(ctx, source, threadID)
+func (portal *PortalInternals) DoThreadBackfill(ctx context.Context, source *UserLogin, threadID networkid.MessageID) error {
+	return (*Portal)(portal).doThreadBackfill(ctx, source, threadID)
 }
 
 func (portal *PortalInternals) CutoffMessages(ctx context.Context, messages []*BackfillMessage, aggressiveDedup, forward bool, lastMessage *database.Message) []*BackfillMessage {
 	return (*Portal)(portal).cutoffMessages(ctx, messages, aggressiveDedup, forward, lastMessage)
 }
 
-func (portal *PortalInternals) SendBackfill(ctx context.Context, source *UserLogin, messages []*BackfillMessage, forceForward, markRead, inThread bool, done func()) {
-	(*Portal)(portal).sendBackfill(ctx, source, messages, forceForward, markRead, inThread, done)
+func (portal *PortalInternals) SendBackfill(ctx context.Context, source *UserLogin, messages []*BackfillMessage, forceForward, markRead, inThread bool, done func()) error {
+	return (*Portal)(portal).sendBackfill(ctx, source, messages, forceForward, markRead, inThread, done)
 }
 
 func (portal *PortalInternals) CompileBatchMessage(ctx context.Context, source *UserLogin, msg *BackfillMessage, out *compileBatchOutput, inThread bool) {
@@ -377,12 +393,12 @@ func (portal *PortalInternals) FetchThreadInsideBatch(ctx context.Context, sourc
 	(*Portal)(portal).fetchThreadInsideBatch(ctx, source, dbMsg, out)
 }
 
-func (portal *PortalInternals) SendBatch(ctx context.Context, source *UserLogin, messages []*BackfillMessage, forceForward, markRead, inThread bool) {
-	(*Portal)(portal).sendBatch(ctx, source, messages, forceForward, markRead, inThread)
+func (portal *PortalInternals) SendBatch(ctx context.Context, source *UserLogin, messages []*BackfillMessage, forceForward, markRead, inThread bool) error {
+	return (*Portal)(portal).sendBatch(ctx, source, messages, forceForward, markRead, inThread)
 }
 
-func (portal *PortalInternals) SendLegacyBackfill(ctx context.Context, source *UserLogin, messages []*BackfillMessage, markRead bool) {
-	(*Portal)(portal).sendLegacyBackfill(ctx, source, messages, markRead)
+func (portal *PortalInternals) SendLegacyBackfill(ctx context.Context, source *UserLogin, messages []*BackfillMessage, markRead bool) error {
+	return (*Portal)(portal).sendLegacyBackfill(ctx, source, messages, markRead)
 }
 
 func (portal *PortalInternals) UnlockedReID(ctx context.Context, target networkid.PortalKey) error {

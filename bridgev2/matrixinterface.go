@@ -28,6 +28,15 @@ type MatrixCapabilities struct {
 	AutoJoinInvites       bool
 	BatchSending          bool
 	ArbitraryMemberChange bool
+	ExtraProfileMeta      bool
+	ReplaceEntireProfile  bool
+}
+
+type BeeperStreamPublisher interface {
+	NewDescriptor(ctx context.Context, roomID id.RoomID, streamType string) (*event.BeeperStreamInfo, error)
+	Register(ctx context.Context, roomID id.RoomID, eventID id.EventID, descriptor *event.BeeperStreamInfo) error
+	Publish(ctx context.Context, roomID id.RoomID, eventID id.EventID, delta map[string]any) error
+	Unregister(roomID id.RoomID, eventID id.EventID)
 }
 
 type MatrixConnector interface {
@@ -47,6 +56,7 @@ type MatrixConnector interface {
 	SendMessageStatus(ctx context.Context, status *MessageStatus, evt *MessageStatusEventInfo)
 
 	GenerateContentURI(ctx context.Context, mediaID networkid.MediaID) (id.ContentURIString, error)
+	ParseContentURI(ctx context.Context, contentURI id.ContentURIString) (networkid.MediaID, error)
 
 	GetPowerLevels(ctx context.Context, roomID id.RoomID) (*event.PowerLevelsEventContent, error)
 	GetMembers(ctx context.Context, roomID id.RoomID) (map[id.UserID]*event.MemberEventContent, error)
@@ -110,6 +120,11 @@ type MatrixConnectorWithPostRoomBridgeHandling interface {
 type MatrixConnectorWithAnalytics interface {
 	MatrixConnector
 	TrackAnalytics(userID id.UserID, event string, properties map[string]any)
+}
+
+type MatrixConnectorWithBeeperStreams interface {
+	MatrixConnector
+	GetBeeperStreamPublisher() BeeperStreamPublisher
 }
 
 type DirectNotificationData struct {
@@ -196,6 +211,7 @@ type MatrixAPI interface {
 	SetDisplayName(ctx context.Context, name string) error
 	SetAvatarURL(ctx context.Context, avatarURL id.ContentURIString) error
 	SetExtraProfileMeta(ctx context.Context, data any) error
+	SetProfile(ctx context.Context, data any) error
 
 	CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (id.RoomID, error)
 	DeleteRoom(ctx context.Context, roomID id.RoomID, puppetsOnly bool) error
@@ -218,7 +234,10 @@ type MarkAsDMMatrixAPI interface {
 	MarkAsDM(ctx context.Context, roomID id.RoomID, otherUser id.UserID) error
 }
 
-type EphemeralSendingMatrixAPI interface {
+// MatrixAPIWithArbitraryRoomState is an extension of MatrixAPI that allows fetching arbitrary state events from a room.
+// This should only be used with double puppets when the bridge wants to ensure that the caller has access to the room.
+// For any other use case, use MatrixConnectorWithArbitraryRoomState instead, which uses the bridge bot.
+type MatrixAPIWithArbitraryRoomState interface {
 	MatrixAPI
-	BeeperSendEphemeralEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, txnID string) (*mautrix.RespSendEvent, error)
+	GetStateEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string) (*event.Event, error)
 }

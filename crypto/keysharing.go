@@ -173,16 +173,13 @@ func (mach *OlmMachine) importForwardedRoomKey(ctx context.Context, evt *Decrypt
 	if content.MaxMessages != 0 {
 		maxMessages = content.MaxMessages
 	}
-	firstKnownIndex := igsInternal.FirstKnownIndex()
-	if firstKnownIndex > 0 {
-		log.Warn().Uint32("first_known_index", firstKnownIndex).Msg("Importing partial session")
-	}
 	igs := &InboundGroupSession{
 		Internal:         igsInternal,
-		SigningKey:       evt.Keys.Ed25519,
+		SigningKey:       content.SenderClaimedKey,
 		SenderKey:        content.SenderKey,
 		RoomID:           content.RoomID,
 		ForwardingChains: append(content.ForwardingKeyChain, evt.SenderKey.String()),
+		SharedHistory:    content.SharedHistory,
 		id:               content.SessionID,
 
 		ReceivedAt:  time.Now().UTC(),
@@ -190,19 +187,13 @@ func (mach *OlmMachine) importForwardedRoomKey(ctx context.Context, evt *Decrypt
 		MaxMessages: maxMessages,
 		IsScheduled: content.IsScheduled,
 		KeySource:   id.KeySourceForward,
+		SourceUser:  evt.Sender,
 	}
-	existingIGS, _ := mach.CryptoStore.GetGroupSession(ctx, igs.RoomID, igs.ID())
-	if existingIGS != nil && existingIGS.Internal.FirstKnownIndex() <= igs.Internal.FirstKnownIndex() {
-		// We already have an equivalent or better session in the store, so don't override it.
-		return false
-	}
-	err = mach.CryptoStore.PutGroupSession(ctx, igs)
+	err = mach.StoreGroupSession(ctx, igs, true)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to store new inbound group session")
+		log.Err(err).Msg("Failed to store new inbound group session")
 		return false
 	}
-	mach.MarkSessionReceived(ctx, content.RoomID, content.SessionID, firstKnownIndex)
-	log.Debug().Msg("Received forwarded inbound group session")
 	return true
 }
 
@@ -362,10 +353,11 @@ func (mach *OlmMachine) HandleRoomKeyRequest(ctx context.Context, sender id.User
 	forwardedRoomKey := event.Content{
 		Parsed: &event.ForwardedRoomKeyEventContent{
 			RoomKeyEventContent: event.RoomKeyEventContent{
-				Algorithm:  id.AlgorithmMegolmV1,
-				RoomID:     igs.RoomID,
-				SessionID:  igs.ID(),
-				SessionKey: string(exportedKey),
+				Algorithm:     id.AlgorithmMegolmV1,
+				RoomID:        igs.RoomID,
+				SessionID:     igs.ID(),
+				SessionKey:    string(exportedKey),
+				SharedHistory: igs.SharedHistory,
 			},
 			SenderKey:          igs.SenderKey,
 			ForwardingKeyChain: igs.ForwardingChains,
@@ -381,6 +373,12 @@ func (mach *OlmMachine) HandleRoomKeyRequest(ctx context.Context, sender id.User
 }
 
 func (mach *OlmMachine) HandleBeeperRoomKeyAck(ctx context.Context, sender id.UserID, content *event.BeeperRoomKeyAckEventContent) {
+	// Room key acks are only used on Beeper. The server will send an ack when the user uploads a key to key backup.
+	// No special authentication is needed. The server is single-tenant, so DoS isn't a concern.
+	// On any other servers, don't do anything.
+	if !mach.DeleteOutboundKeysOnAck {
+		return
+	}
 	log := mach.machOrContextLog(ctx).With().
 		Str("room_id", content.RoomID.String()).
 		Str("session_id", content.SessionID.String()).
@@ -405,7 +403,7 @@ func (mach *OlmMachine) HandleBeeperRoomKeyAck(ctx context.Context, sender id.Us
 		Logger()
 
 	isInbound := sess.SenderKey == mach.OwnIdentity().IdentityKey
-	if isInbound && mach.DeleteOutboundKeysOnAck && content.FirstMessageIndex == 0 {
+	if isInbound && content.FirstMessageIndex == 0 {
 		log.Debug().Msg("Redacting inbound copy of outbound group session after ack")
 		err = mach.CryptoStore.RedactGroupSession(ctx, content.RoomID, content.SessionID, "outbound session acked")
 		if err != nil {

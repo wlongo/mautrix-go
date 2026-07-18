@@ -27,18 +27,23 @@ type EventMeta struct {
 	Timestamp         time.Time
 	StreamOrder       int64
 
-	PreHandleFunc  func(context.Context, *bridgev2.Portal)
-	PostHandleFunc func(context.Context, *bridgev2.Portal)
+	PreHandleFunc     func(context.Context, *bridgev2.Portal)
+	PostHandleFunc    func(context.Context, *bridgev2.Portal)
+	MutateContextFunc func(context.Context) context.Context
+
+	FetchCertainPortalKeyFunc func(context.Context) networkid.PortalKey
 }
 
 var (
-	_ bridgev2.RemoteEvent                            = (*EventMeta)(nil)
-	_ bridgev2.RemoteEventWithUncertainPortalReceiver = (*EventMeta)(nil)
-	_ bridgev2.RemoteEventThatMayCreatePortal         = (*EventMeta)(nil)
-	_ bridgev2.RemoteEventWithTimestamp               = (*EventMeta)(nil)
-	_ bridgev2.RemoteEventWithStreamOrder             = (*EventMeta)(nil)
-	_ bridgev2.RemotePreHandler                       = (*EventMeta)(nil)
-	_ bridgev2.RemotePostHandler                      = (*EventMeta)(nil)
+	_ bridgev2.RemoteEvent                                   = (*EventMeta)(nil)
+	_ bridgev2.RemoteEventWithUncertainPortalReceiver        = (*EventMeta)(nil)
+	_ bridgev2.RemoteEventWithUncertainPortalReceiverFetcher = (*EventMeta)(nil)
+	_ bridgev2.RemoteEventThatMayCreatePortal                = (*EventMeta)(nil)
+	_ bridgev2.RemoteEventWithTimestamp                      = (*EventMeta)(nil)
+	_ bridgev2.RemoteEventWithStreamOrder                    = (*EventMeta)(nil)
+	_ bridgev2.RemotePreHandler                              = (*EventMeta)(nil)
+	_ bridgev2.RemotePostHandler                             = (*EventMeta)(nil)
+	_ bridgev2.RemoteEventWithContextMutation                = (*EventMeta)(nil)
 )
 
 func (evt *EventMeta) AddLogContext(c zerolog.Context) zerolog.Context {
@@ -54,6 +59,13 @@ func (evt *EventMeta) GetPortalKey() networkid.PortalKey {
 
 func (evt *EventMeta) PortalReceiverIsUncertain() bool {
 	return evt.UncertainReceiver
+}
+
+func (evt *EventMeta) FetchCertainPortalKey(ctx context.Context) networkid.PortalKey {
+	if evt.FetchCertainPortalKeyFunc == nil {
+		return networkid.PortalKey{}
+	}
+	return evt.FetchCertainPortalKeyFunc(ctx)
 }
 
 func (evt *EventMeta) GetTimestamp() time.Time {
@@ -89,6 +101,13 @@ func (evt *EventMeta) PostHandle(ctx context.Context, portal *bridgev2.Portal) {
 	if evt.PostHandleFunc != nil {
 		evt.PostHandleFunc(ctx, portal)
 	}
+}
+
+func (evt *EventMeta) MutateContext(ctx context.Context) context.Context {
+	if evt.MutateContextFunc == nil {
+		return ctx
+	}
+	return evt.MutateContextFunc(ctx)
 }
 
 func (evt EventMeta) WithType(t bridgev2.RemoteEventType) EventMeta {

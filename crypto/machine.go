@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/exsync"
 	"go.mau.fi/util/ptr"
 
 	"go.mau.fi/util/exzerolog"
@@ -38,12 +39,14 @@ type OlmMachine struct {
 	backgroundCtx       context.Context
 	cancelBackgroundCtx context.CancelFunc
 
-	PlaintextMentions   bool
-	MSC4392Relations    bool
-	AllowEncryptedState bool
+	PlaintextMentions      bool
+	MSC4392Relations       bool
+	AllowEncryptedState    bool
+	AllowBeeperRoomReroute bool
 
 	// Never ask the server for keys automatically as a side effect during Megolm decryption.
 	DisableDecryptKeyFetching bool
+	keyFetchAttempted         *exsync.Set[userSenderKeyTuple]
 
 	// Don't mark outbound Olm sessions as shared for devices they were initially sent to.
 	DisableSharedGroupSessionTracking bool
@@ -52,8 +55,6 @@ type OlmMachine struct {
 
 	SendKeysMinTrust  id.TrustState
 	ShareKeysMinTrust id.TrustState
-
-	AllowKeyShare func(context.Context, *id.Device, event.RequestedKeyInfo) *KeyShareRejection
 
 	account *OlmAccount
 
@@ -65,6 +66,8 @@ type OlmMachine struct {
 
 	// Optional callback which is called when we save a session to store
 	SessionReceived func(context.Context, id.RoomID, id.SessionID, uint32)
+	AllowKeyShare   func(context.Context, *id.Device, event.RequestedKeyInfo) *KeyShareRejection
+	OnRoomKeyBundle func(context.Context, *event.RoomKeyBundleEventContent)
 
 	devicesToUnwedge     map[id.IdentityKey]bool
 	devicesToUnwedgeLock sync.Mutex
@@ -76,7 +79,7 @@ type OlmMachine struct {
 
 	olmLock           sync.Mutex
 	megolmEncryptLock sync.Mutex
-	megolmDecryptLock sync.Mutex
+	megolmDecryptLock exsync.KeyedMutex[id.SessionID]
 
 	otkUploadLock       sync.Mutex
 	lastOTKUpload       time.Time
@@ -86,6 +89,7 @@ type OlmMachine struct {
 	crossSigningPubkeys *CrossSigningPublicKeysCache
 
 	crossSigningPubkeysFetched bool
+	ownDeviceKeysCache         atomic.Pointer[mautrix.DeviceKeys]
 
 	DeleteOutboundKeysOnAck      bool
 	DontStoreOutboundKeys        bool
@@ -107,6 +111,7 @@ type StateStore interface {
 	IsEncrypted(context.Context, id.RoomID) (bool, error)
 	// GetEncryptionEvent returns the encryption event's content for an encrypted room.
 	GetEncryptionEvent(context.Context, id.RoomID) (*event.EncryptionEventContent, error)
+	GetHistoryVisibility(ctx context.Context, roomID id.RoomID) (*event.HistoryVisibilityEventContent, error)
 	// FindSharedRooms returns the encrypted rooms that another user is also in for a user ID.
 	FindSharedRooms(context.Context, id.UserID) ([]id.RoomID, error)
 }
@@ -135,6 +140,8 @@ func NewOlmMachine(client *mautrix.Client, log *zerolog.Logger, cryptoStore Stor
 		devicesToUnwedge: make(map[id.IdentityKey]bool),
 		recentlyUnwedged: make(map[id.IdentityKey]time.Time),
 		secretListeners:  make(map[string]chan<- string),
+
+		keyFetchAttempted: exsync.NewSet[userSenderKeyTuple](),
 	}
 	mach.backgroundCtx, mach.cancelBackgroundCtx = context.WithCancel(context.Background())
 	mach.AllowKeyShare = mach.defaultAllowKeyShare
@@ -346,7 +353,7 @@ func (mach *OlmMachine) ProcessSyncResponse(ctx context.Context, resp *mautrix.R
 
 // HandleMemberEvent handles a single membership event.
 //
-// Currently this is not automatically called, so you must add a listener yourself:
+// Currently, this is not automatically called, so you must add a listener yourself:
 //
 //	client.Syncer.(mautrix.ExtensibleSyncer).OnEventType(event.StateMember, c.crypto.HandleMemberEvent)
 func (mach *OlmMachine) HandleMemberEvent(ctx context.Context, evt *event.Event) {
@@ -375,6 +382,7 @@ func (mach *OlmMachine) HandleMemberEvent(ctx context.Context, evt *event.Event)
 		(prevContent.Membership == event.MembershipLeave && content.Membership == event.MembershipBan) {
 		return
 	}
+	// TODO on joins and invites, it would be enough to mark the session as needing re-sharing to that user instead of deleting it
 	mach.Log.Trace().
 		Str("room_id", evt.RoomID.String()).
 		Str("user_id", evt.GetStateKey()).
@@ -387,9 +395,39 @@ func (mach *OlmMachine) HandleMemberEvent(ctx context.Context, evt *event.Event)
 	}
 }
 
+func (mach *OlmMachine) HandleHistoryVisibility(ctx context.Context, evt *event.Event) {
+	vis, ok := evt.Content.Parsed.(*event.HistoryVisibilityEventContent)
+	if !ok {
+		return
+	}
+	log := mach.machOrContextLog(ctx)
+	outboundSession, err := mach.CryptoStore.GetOutboundGroupSession(ctx, evt.RoomID)
+	if err != nil {
+		log.Err(err).Msg("Failed to get outbound group session to check history visibility change")
+	} else if outboundSession == nil {
+		return
+	}
+	shareHistory := vis.SharedHistory()
+	if outboundSession.SharedHistory != nil && *outboundSession.SharedHistory != shareHistory {
+		log.Trace().
+			Stringer("room_id", evt.RoomID).
+			Any("prev_shared_history", outboundSession.SharedHistory).
+			Stringer("new_history_visibility", vis.HistoryVisibility).
+			Msg("History visibility changed, invalidating outbound group session")
+		err = mach.CryptoStore.RemoveOutboundGroupSession(ctx, evt.RoomID)
+		if err != nil {
+			log.Err(err).Msg("Failed to invalidate outbound group session on history visibility change")
+		}
+	}
+}
+
 func (mach *OlmMachine) HandleEncryptedEvent(ctx context.Context, evt *event.Event) *DecryptedOlmEvent {
-	if _, ok := evt.Content.Parsed.(*event.EncryptedEventContent); !ok {
+	content, ok := evt.Content.Parsed.(*event.EncryptedEventContent)
+	if !ok {
 		mach.machOrContextLog(ctx).Warn().Msg("Passed invalid event to encrypted handler")
+		return nil
+	} else if content.Algorithm == id.AlgorithmBeeperStreamV1 {
+		mach.machOrContextLog(ctx).Debug().Msg("Skipping beeper stream encrypted to-device event in Olm machine")
 		return nil
 	}
 
@@ -401,8 +439,8 @@ func (mach *OlmMachine) HandleEncryptedEvent(ctx context.Context, evt *event.Eve
 
 	log := mach.machOrContextLog(ctx).With().
 		Str("decrypted_type", decryptedEvt.Type.Type).
-		Str("sender_device", decryptedEvt.SenderDevice.String()).
-		Str("sender_signing_key", decryptedEvt.Keys.Ed25519.String()).
+		Stringer("sender_device", ptr.Val(decryptedEvt.SenderDevice).DeviceID).
+		Stringer("sender_signing_key", decryptedEvt.Keys.Ed25519).
 		Logger()
 	log.Trace().Msg("Successfully decrypted to-device event")
 
@@ -418,6 +456,9 @@ func (mach *OlmMachine) HandleEncryptedEvent(ctx context.Context, evt *event.Eve
 			}
 		}
 		log.Trace().Msg("Handled forwarded room key event")
+	case *event.RoomKeyBundleEventContent:
+		mach.receiveRoomKeyBundle(ctx, decryptedEvt, decryptedContent)
+		log.Trace().Msg("Handled room key bundle")
 	case *event.DummyEventContent:
 		log.Debug().Msg("Received encrypted dummy event")
 	case *event.SecretSendEventContent:
@@ -589,9 +630,12 @@ func (mach *OlmMachine) SendEncryptedToDevice(ctx context.Context, device *id.De
 	return err
 }
 
-func (mach *OlmMachine) createGroupSession(ctx context.Context, senderKey id.SenderKey, signingKey id.Ed25519, roomID id.RoomID, sessionID id.SessionID, sessionKey string, maxAge time.Duration, maxMessages int, isScheduled bool) error {
+func (mach *OlmMachine) createGroupSession(
+	ctx context.Context, sender id.UserID, senderKey id.SenderKey, signingKey id.Ed25519, roomID id.RoomID, sessionID id.SessionID,
+	sessionKey string, maxAge time.Duration, maxMessages int, sharedHistory *bool, isScheduled bool,
+) error {
 	log := zerolog.Ctx(ctx)
-	igs, err := NewInboundGroupSession(senderKey, signingKey, roomID, sessionKey, maxAge, maxMessages, isScheduled)
+	igs, err := NewInboundGroupSession(senderKey, signingKey, roomID, sessionKey, maxAge, maxMessages, sharedHistory, isScheduled)
 	if err != nil {
 		return fmt.Errorf("failed to create inbound group session: %w", err)
 	} else if igs.ID() != sessionID {
@@ -601,19 +645,59 @@ func (mach *OlmMachine) createGroupSession(ctx context.Context, senderKey id.Sen
 			Msg("Mismatched session ID while creating inbound group session")
 		return fmt.Errorf("mismatched session ID while creating inbound group session")
 	}
-	err = mach.CryptoStore.PutGroupSession(ctx, igs)
+	igs.SourceUser = sender
+	err = mach.StoreGroupSession(ctx, igs, true)
 	if err != nil {
 		log.Err(err).Stringer("session_id", sessionID).Msg("Failed to store new inbound group session")
 		return fmt.Errorf("failed to store new inbound group session: %w", err)
 	}
-	mach.MarkSessionReceived(ctx, roomID, sessionID, igs.Internal.FirstKnownIndex())
-	log.Debug().
-		Str("session_id", sessionID.String()).
-		Str("sender_key", senderKey.String()).
-		Str("max_age", maxAge.String()).
-		Int("max_messages", maxMessages).
-		Bool("is_scheduled", isScheduled).
-		Msg("Received inbound group session")
+	return nil
+}
+
+func (mach *OlmMachine) StoreGroupSession(ctx context.Context, igs *InboundGroupSession, lock bool) error {
+	sessID := igs.ID()
+	if lock {
+		mach.megolmDecryptLock.Lock(sessID)
+		defer mach.megolmDecryptLock.Unlock(sessID)
+	}
+	origSource := igs.KeySource
+	existing, err := mach.CryptoStore.GetGroupSession(ctx, igs.RoomID, sessID)
+	if err != nil {
+		return fmt.Errorf("failed to check for existing group session: %w", err)
+	} else if existing != nil {
+		if existing.Internal.FirstKnownIndex() <= igs.Internal.FirstKnownIndex() {
+			if existing.KeySource == id.KeySourceDirect || igs.KeySource != id.KeySourceDirect {
+				// The new session is no better than the existing one, don't do anything.
+				return nil
+			}
+			// The existing session has an earlier index than the new one, but the new one was received directly,
+			// so save the new key source to flag the session as more trusted.
+			existing.KeySource = igs.KeySource
+			existing.ForwardingChains = igs.ForwardingChains
+			existing.SourceUser = igs.SourceUser
+			igs = existing
+		} else if existing.KeySource == id.KeySourceDirect {
+			// The new session has an earlier index than the existing one, but the existing one was received directly,
+			// so keep the existing key source to keep the session flagged as trusted.
+			igs.KeySource = existing.KeySource
+			igs.ForwardingChains = existing.ForwardingChains
+			igs.SourceUser = existing.SourceUser
+		}
+
+		// Use oldest received at time
+		if igs.ReceivedAt.After(existing.ReceivedAt) {
+			igs.ReceivedAt = existing.ReceivedAt
+		}
+	}
+	log := zerolog.Ctx(ctx).With().
+		Bool("is_update", existing == nil).
+		Stringer("update_source", origSource).
+		Logger()
+	err = mach.CryptoStore.PutGroupSession(log.WithContext(ctx), igs)
+	if err != nil {
+		return fmt.Errorf("failed to store new inbound group session: %w", err)
+	}
+	mach.MarkSessionReceived(ctx, igs.RoomID, sessID, igs.Internal.FirstKnownIndex())
 	return nil
 }
 
@@ -691,6 +775,7 @@ func (mach *OlmMachine) receiveRoomKey(ctx context.Context, evt *DecryptedOlmEve
 	if content.MaxMessages != 0 {
 		maxMessages = content.MaxMessages
 	}
+	// TODO(history sharing): fill shared history with current state if it's unset?
 	if mach.DeletePreviousKeysOnReceive && !content.IsScheduled {
 		log.Debug().Msg("Redacting previous megolm sessions from sender in room")
 		sessionIDs, err := mach.CryptoStore.RedactGroupSessions(ctx, content.RoomID, evt.SenderKey, "received new key from device")
@@ -702,7 +787,10 @@ func (mach *OlmMachine) receiveRoomKey(ctx context.Context, evt *DecryptedOlmEve
 				Msg("Redacted previous megolm sessions")
 		}
 	}
-	err = mach.createGroupSession(ctx, evt.SenderKey, evt.Keys.Ed25519, content.RoomID, content.SessionID, content.SessionKey, maxAge, maxMessages, content.IsScheduled)
+	err = mach.createGroupSession(
+		ctx, evt.Sender, evt.SenderKey, evt.Keys.Ed25519, content.RoomID, content.SessionID, content.SessionKey,
+		maxAge, maxMessages, content.SharedHistory, content.IsScheduled,
+	)
 	if err != nil {
 		log.Err(err).Msg("Failed to create inbound group session")
 	}
@@ -718,6 +806,32 @@ func (mach *OlmMachine) HandleRoomKeyWithheld(ctx context.Context, content *even
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("Failed to save room key withheld event")
 	}
+}
+
+func (mach *OlmMachine) getKeysForOlmMessage(ctx context.Context) *mautrix.DeviceKeys {
+	if keys := mach.ownDeviceKeysCache.Load(); keys != nil {
+		return keys
+	}
+	keys := mach.account.getInitialKeys(mach.Client.UserID, mach.Client.DeviceID)
+	csKeys, err := mach.GetOwnCrossSigningPublicKeys(ctx)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("Failed to get own cross signing keys")
+		return keys
+	} else if csKeys == nil {
+		mach.ownDeviceKeysCache.Store(keys)
+		return keys
+	}
+	sigs, err := mach.CryptoStore.GetSignaturesForKeyBy(ctx, mach.Client.UserID, keys.Keys.GetEd25519(mach.Client.DeviceID), mach.Client.UserID)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("Failed to get signatures for own device keys")
+		return keys
+	}
+	selfSig, ok := sigs[csKeys.SelfSigningKey]
+	if ok {
+		keys.Signatures[mach.Client.UserID][id.NewKeyID(id.KeyAlgorithmEd25519, csKeys.SelfSigningKey.String())] = selfSig
+	}
+	mach.ownDeviceKeysCache.Store(keys)
+	return keys
 }
 
 // ShareKeys uploads necessary keys to the server.

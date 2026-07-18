@@ -10,46 +10,72 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
+	"go.mau.fi/util/exhttp"
 	"go.mau.fi/util/exslices"
 	"go.mau.fi/util/jsontime"
 
 	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/crypto/canonicaljson"
 	"maunium.net/go/mautrix/federation/signutil"
 	"maunium.net/go/mautrix/id"
 )
 
 type Client struct {
-	HTTP       *http.Client
-	ServerName string
-	UserAgent  string
-	Key        *SigningKey
+	HTTP        *http.Client
+	ExtHTTP     *http.Client
+	Dialer      *net.Dialer
+	AllowIP     func(net.IP) bool
+	AllowServer func(string) bool
+	ServerName  string
+	UserAgent   string
+	Key         *SigningKey
 
 	ResponseSizeLimit int64
 }
 
-func NewClient(serverName string, key *SigningKey, cache ResolutionCache) *Client {
-	return &Client{
+func NewClient(serverName string, key *SigningKey, cache ResolutionCache, httpSettings exhttp.ClientSettings) *Client {
+	dialer := &net.Dialer{Timeout: httpSettings.DialTimeout}
+	c := &Client{
 		HTTP: &http.Client{
-			Transport: NewServerResolvingTransport(cache),
-			Timeout:   120 * time.Second,
+			Transport: NewServerResolvingTransport(cache, dialer.DialContext, httpSettings),
+			Timeout:   httpSettings.GlobalTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				// Federation requests do not allow redirects.
 				return http.ErrUseLastResponse
 			},
 		},
+		ExtHTTP:    httpSettings.WithDial(dialer.DialContext).Compile(),
+		Dialer:     dialer,
 		UserAgent:  mautrix.DefaultUserAgent,
 		ServerName: serverName,
 		Key:        key,
+		AllowIP:    DefaultAllowIP,
 
 		ResponseSizeLimit: mautrix.DefaultResponseSizeLimit,
 	}
+	c.ExtHTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// External requests (like media download redirects) can redirect further themselves,
+		// but only allow secure URLs.
+		if req.URL.Scheme != "https" {
+			return fmt.Errorf("attempted to redirect to non-https URL")
+		}
+		return nil
+	}
+	dialer.ControlContext = c.controlConn
+	return c
+}
+
+func DefaultAllowIP(ip net.IP) bool {
+	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLinkLocalMulticast()
 }
 
 func (c *Client) Version(ctx context.Context, serverName string) (resp *RespServerVersion, err error) {
@@ -524,7 +550,13 @@ func (c *Client) MakeFullRequest(ctx context.Context, params RequestParams) ([]b
 	return body, resp, nil
 }
 
+var ErrNotConfiguredForAuth = errors.New("client not configured for authentication")
+var ErrServerNameFiltered = errors.New("refusing to make a request")
+
 func (c *Client) compileRequest(ctx context.Context, params RequestParams) (*http.Request, error) {
+	if c.AllowServer != nil && !c.AllowServer(params.ServerName) {
+		return nil, fmt.Errorf("%w to %s", ErrServerNameFiltered, params.ServerName)
+	}
 	reqURL := mautrix.BuildURL(&url.URL{
 		Scheme: "matrix-federation",
 		Host:   params.ServerName,
@@ -553,9 +585,7 @@ func (c *Client) compileRequest(ctx context.Context, params RequestParams) (*htt
 	req.Header.Set("User-Agent", c.UserAgent)
 	if params.Authenticate {
 		if c.ServerName == "" || c.Key == nil {
-			return nil, mautrix.HTTPError{
-				Message: "client not configured for authentication",
-			}
+			return nil, mautrix.HTTPError{WrappedError: ErrNotConfiguredForAuth}
 		}
 		auth, err := (&signableRequest{
 			Method:      req.Method,
@@ -584,11 +614,11 @@ type signableRequest struct {
 }
 
 func (r *signableRequest) Verify(key id.SigningKey, sig string) error {
-	message, err := json.Marshal(r)
+	message, err := canonicaljson.Marshal(r)
 	if err != nil {
 		return fmt.Errorf("failed to marshal data: %w", err)
 	}
-	return signutil.VerifyJSONRaw(key, sig, message)
+	return signutil.VerifyJSONCanonical(key, sig, message)
 }
 
 func (r *signableRequest) Sign(key *SigningKey) (string, error) {

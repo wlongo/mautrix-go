@@ -25,6 +25,7 @@ type AppserviceConfig struct {
 	PublicAddress string `yaml:"public_address"`
 	Hostname      string `yaml:"hostname"`
 	Port          uint16 `yaml:"port"`
+	NoServer      bool   `yaml:"-"`
 
 	ID  string        `yaml:"id"`
 	Bot BotUserConfig `yaml:"bot"`
@@ -109,6 +110,7 @@ func (config *Config) MakeAppService() *appservice.AppService {
 	as.Host.Hostname = config.AppService.Hostname
 	as.Host.Port = config.AppService.Port
 	as.Registration = config.AppService.GetRegistration()
+	as.DefaultHTTPRetries = config.Homeserver.RetryLimit
 	config.Encryption.applyUnstableFlags(as.Registration)
 	return as
 }

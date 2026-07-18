@@ -15,9 +15,9 @@ import (
 	"net/http/pprof"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/rs/xid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/hlog"
 	"go.mau.fi/util/exerrors"
@@ -71,20 +71,10 @@ type ProvisioningAPI struct {
 	GetUserIDFromRequest func(r *http.Request) id.UserID
 }
 
-type ProvLogin struct {
-	ID       string
-	Process  bridgev2.LoginProcess
-	NextStep *bridgev2.LoginStep
-	Override *bridgev2.UserLogin
-	Lock     sync.Mutex
-}
-
 type provisioningContextKey int
 
 const (
 	provisioningUserKey provisioningContextKey = iota
-	provisioningUserLoginKey
-	provisioningLoginProcessKey
 	ProvisioningKeyRequest
 )
 
@@ -106,18 +96,14 @@ func (prov *ProvisioningAPI) Init() {
 	prov.sessionTransfers = make(map[networkid.UserLoginID]struct{})
 	prov.net = prov.br.Bridge.Network
 	prov.log = prov.br.Log.With().Str("component", "provisioning").Logger()
-	prov.fedClient = federation.NewClient("", nil, nil)
-	prov.fedClient.HTTP.Timeout = 20 * time.Second
-	tp := prov.fedClient.HTTP.Transport.(*federation.ServerResolvingTransport)
-	tp.Dialer.Timeout = 10 * time.Second
-	tp.Transport.ResponseHeaderTimeout = 10 * time.Second
-	tp.Transport.TLSHandshakeTimeout = 10 * time.Second
+	prov.fedClient = federation.NewClient("", nil, nil, exhttp.SensibleClientSettings.WithGlobalTimeout(20*time.Second))
 	prov.Router = http.NewServeMux()
 	prov.Router.HandleFunc("GET /v3/whoami", prov.GetWhoami)
 	prov.Router.HandleFunc("GET /v3/capabilities", prov.GetCapabilities)
 	prov.Router.HandleFunc("GET /v3/login/flows", prov.GetLoginFlows)
 	prov.Router.HandleFunc("POST /v3/login/start/{flowID}", prov.PostLoginStart)
 	prov.Router.HandleFunc("POST /v3/login/step/{loginProcessID}/{stepID}/{stepType}", prov.PostLoginStep)
+	prov.Router.HandleFunc("POST /v3/login/cancel/{loginProcessID}", prov.PostLoginCancel)
 	prov.Router.HandleFunc("POST /v3/logout/{loginID}", prov.PostLogout)
 	prov.Router.HandleFunc("GET /v3/logins", prov.GetLogins)
 	prov.Router.HandleFunc("GET /v3/contacts", prov.GetContactList)
@@ -125,6 +111,10 @@ func (prov *ProvisioningAPI) Init() {
 	prov.Router.HandleFunc("GET /v3/resolve_identifier/{identifier}", prov.GetResolveIdentifier)
 	prov.Router.HandleFunc("POST /v3/create_dm/{identifier}", prov.PostCreateDM)
 	prov.Router.HandleFunc("POST /v3/create_group/{type}", prov.PostCreateGroup)
+	prov.Router.HandleFunc("POST /v3/backfill/{roomID}", prov.PostPaginate)
+	prov.Router.HandleFunc("GET /v3/image_pack/import", prov.ImportImagePack)
+	prov.Router.HandleFunc("POST /v3/image_pack/import", prov.ImportImagePack)
+	prov.Router.HandleFunc("GET /v3/image_pack/list", prov.ListImagePacks)
 
 	if prov.br.Config.Provisioning.EnableSessionTransfers {
 		prov.log.Debug().Msg("Enabling session transfer API")
@@ -247,7 +237,9 @@ func (prov *ProvisioningAPI) AuthMiddleware(h http.Handler) http.Handler {
 		}
 		if !exstrings.ConstantTimeEqual(auth, secret) {
 			var err error
-			if strings.HasPrefix(auth, "openid:") {
+			if !prov.br.Config.Provisioning.AllowMatrixAuth {
+				err = errors.New("matrix auth is disabled")
+			} else if strings.HasPrefix(auth, "openid:") {
 				err = prov.checkFederatedMatrixAuth(r.Context(), userID, strings.TrimPrefix(auth, "openid:"))
 			} else {
 				err = prov.checkMatrixAuth(r.Context(), userID, auth)
@@ -324,7 +316,7 @@ func (prov *ProvisioningAPI) GetWhoami(w http.ResponseWriter, r *http.Request) {
 		prevState.UserID = ""
 		prevState.RemoteID = ""
 		prevState.RemoteName = ""
-		prevState.RemoteProfile = nil
+		prevState.RemoteProfile = status.RemoteProfile{}
 		resp.Logins[i] = RespWhoamiLogin{
 			StateEvent:  prevState.StateEvent,
 			StateTS:     prevState.Timestamp,
@@ -358,186 +350,6 @@ func (prov *ProvisioningAPI) GetLoginFlows(w http.ResponseWriter, r *http.Reques
 
 func (prov *ProvisioningAPI) GetCapabilities(w http.ResponseWriter, r *http.Request) {
 	exhttp.WriteJSONResponse(w, http.StatusOK, &prov.net.GetCapabilities().Provisioning)
-}
-
-var ErrNilStep = errors.New("bridge returned nil step with no error")
-var ErrTooManyLogins = bridgev2.RespError{ErrCode: "FI.MAU.BRIDGE.TOO_MANY_LOGINS", Err: "Maximum number of logins exceeded"}
-
-func (prov *ProvisioningAPI) PostLoginStart(w http.ResponseWriter, r *http.Request) {
-	overrideLogin, failed := prov.GetExplicitLoginForRequest(w, r)
-	if failed {
-		return
-	}
-	user := prov.GetUser(r)
-	if overrideLogin == nil && user.HasTooManyLogins() {
-		ErrTooManyLogins.AppendMessage(" (%d)", user.Permissions.MaxLogins).Write(w)
-		return
-	}
-	login, err := prov.net.CreateLogin(r.Context(), user, r.PathValue("flowID"))
-	if err != nil {
-		zerolog.Ctx(r.Context()).Err(err).Msg("Failed to create login process")
-		RespondWithError(w, err, "Internal error creating login process")
-		return
-	}
-	var firstStep *bridgev2.LoginStep
-	overridable, ok := login.(bridgev2.LoginProcessWithOverride)
-	if ok && overrideLogin != nil {
-		firstStep, err = overridable.StartWithOverride(r.Context(), overrideLogin)
-	} else {
-		firstStep, err = login.Start(r.Context())
-	}
-	if err == nil && firstStep == nil {
-		err = ErrNilStep
-	}
-	if err != nil {
-		zerolog.Ctx(r.Context()).Err(err).Msg("Failed to start login")
-		RespondWithError(w, err, "Internal error starting login")
-		return
-	}
-	loginID := xid.New().String()
-	prov.loginsLock.Lock()
-	prov.logins[loginID] = &ProvLogin{
-		ID:       loginID,
-		Process:  login,
-		NextStep: firstStep,
-		Override: overrideLogin,
-	}
-	prov.loginsLock.Unlock()
-	zerolog.Ctx(r.Context()).Info().
-		Any("first_step", firstStep).
-		Msg("Created login process")
-	exhttp.WriteJSONResponse(w, http.StatusOK, &RespSubmitLogin{LoginID: loginID, LoginStep: firstStep})
-}
-
-func (prov *ProvisioningAPI) handleCompleteStep(ctx context.Context, login *ProvLogin, step *bridgev2.LoginStep) {
-	zerolog.Ctx(ctx).Info().
-		Str("step_id", step.StepID).
-		Str("user_login_id", string(step.CompleteParams.UserLoginID)).
-		Msg("Login completed successfully")
-	prov.deleteLogin(login, false)
-	if login.Override == nil || login.Override.ID == step.CompleteParams.UserLoginID {
-		return
-	}
-	zerolog.Ctx(ctx).Info().
-		Str("old_login_id", string(login.Override.ID)).
-		Str("new_login_id", string(step.CompleteParams.UserLoginID)).
-		Msg("Login resulted in different remote ID than what was being overridden. Deleting previous login")
-	login.Override.Delete(ctx, status.BridgeState{
-		StateEvent: status.StateLoggedOut,
-		Reason:     "LOGIN_OVERRIDDEN",
-	}, bridgev2.DeleteOpts{LogoutRemote: true})
-}
-
-func (prov *ProvisioningAPI) deleteLogin(login *ProvLogin, cancel bool) {
-	if cancel {
-		login.Process.Cancel()
-	}
-	prov.loginsLock.Lock()
-	delete(prov.logins, login.ID)
-	prov.loginsLock.Unlock()
-}
-
-func (prov *ProvisioningAPI) PostLoginStep(w http.ResponseWriter, r *http.Request) {
-	loginID := r.PathValue("loginProcessID")
-	prov.loginsLock.RLock()
-	login, ok := prov.logins[loginID]
-	prov.loginsLock.RUnlock()
-	if !ok {
-		zerolog.Ctx(r.Context()).Warn().Str("login_id", loginID).Msg("Login not found")
-		mautrix.MNotFound.WithMessage("Login not found").Write(w)
-		return
-	}
-	login.Lock.Lock()
-	// This will only unlock after the handler runs
-	defer login.Lock.Unlock()
-	stepID := r.PathValue("stepID")
-	if login.NextStep.StepID != stepID {
-		zerolog.Ctx(r.Context()).Warn().
-			Str("request_step_id", stepID).
-			Str("expected_step_id", login.NextStep.StepID).
-			Msg("Step ID does not match")
-		mautrix.MBadState.WithMessage("Step ID does not match").Write(w)
-		return
-	}
-	stepType := r.PathValue("stepType")
-	if login.NextStep.Type != bridgev2.LoginStepType(stepType) {
-		zerolog.Ctx(r.Context()).Warn().
-			Str("request_step_type", stepType).
-			Str("expected_step_type", string(login.NextStep.Type)).
-			Msg("Step type does not match")
-		mautrix.MBadState.WithMessage("Step type does not match").Write(w)
-		return
-	}
-	ctx := context.WithValue(r.Context(), provisioningLoginProcessKey, login)
-	r = r.WithContext(ctx)
-	switch bridgev2.LoginStepType(r.PathValue("stepType")) {
-	case bridgev2.LoginStepTypeUserInput, bridgev2.LoginStepTypeCookies:
-		prov.PostLoginSubmitInput(w, r)
-	case bridgev2.LoginStepTypeDisplayAndWait:
-		prov.PostLoginWait(w, r)
-	case bridgev2.LoginStepTypeComplete:
-		fallthrough
-	default:
-		// This is probably impossible because of the above check that the next step type matches the request.
-		mautrix.MUnrecognized.WithMessage("Invalid step type %q", r.PathValue("stepType")).Write(w)
-	}
-}
-
-func (prov *ProvisioningAPI) PostLoginSubmitInput(w http.ResponseWriter, r *http.Request) {
-	var params map[string]string
-	err := json.NewDecoder(r.Body).Decode(&params)
-	if err != nil {
-		zerolog.Ctx(r.Context()).Err(err).Msg("Failed to decode request body")
-		mautrix.MNotJSON.WithMessage("Failed to decode request body").Write(w)
-		return
-	}
-	login := r.Context().Value(provisioningLoginProcessKey).(*ProvLogin)
-	var nextStep *bridgev2.LoginStep
-	switch login.NextStep.Type {
-	case bridgev2.LoginStepTypeUserInput:
-		nextStep, err = login.Process.(bridgev2.LoginProcessUserInput).SubmitUserInput(r.Context(), params)
-	case bridgev2.LoginStepTypeCookies:
-		nextStep, err = login.Process.(bridgev2.LoginProcessCookies).SubmitCookies(r.Context(), params)
-	default:
-		panic("Impossible state")
-	}
-	if err == nil && nextStep == nil {
-		err = ErrNilStep
-	}
-	if err != nil {
-		zerolog.Ctx(r.Context()).Err(err).Msg("Failed to submit input")
-		RespondWithError(w, err, "Internal error submitting input")
-		prov.deleteLogin(login, true)
-		return
-	}
-	login.NextStep = nextStep
-	if nextStep.Type == bridgev2.LoginStepTypeComplete {
-		prov.handleCompleteStep(r.Context(), login, nextStep)
-	} else {
-		zerolog.Ctx(r.Context()).Debug().Any("next_step", nextStep).Msg("Returning next login step")
-	}
-	exhttp.WriteJSONResponse(w, http.StatusOK, &RespSubmitLogin{LoginID: login.ID, LoginStep: nextStep})
-}
-
-func (prov *ProvisioningAPI) PostLoginWait(w http.ResponseWriter, r *http.Request) {
-	login := r.Context().Value(provisioningLoginProcessKey).(*ProvLogin)
-	nextStep, err := login.Process.(bridgev2.LoginProcessDisplayAndWait).Wait(r.Context())
-	if err == nil && nextStep == nil {
-		err = ErrNilStep
-	}
-	if err != nil {
-		zerolog.Ctx(r.Context()).Err(err).Msg("Failed to wait")
-		RespondWithError(w, err, "Internal error waiting for login")
-		prov.deleteLogin(login, true)
-		return
-	}
-	login.NextStep = nextStep
-	if nextStep.Type == bridgev2.LoginStepTypeComplete {
-		prov.handleCompleteStep(r.Context(), login, nextStep)
-	} else {
-		zerolog.Ctx(r.Context()).Debug().Any("next_step", nextStep).Msg("Returning next login step")
-	}
-	exhttp.WriteJSONResponse(w, http.StatusOK, &RespSubmitLogin{LoginID: login.ID, LoginStep: nextStep})
 }
 
 func (prov *ProvisioningAPI) PostLogout(w http.ResponseWriter, r *http.Request) {
@@ -615,7 +427,7 @@ func RespondWithError(w http.ResponseWriter, err error, message string) {
 	if errors.As(err, &we) {
 		we.Write(w)
 	} else {
-		mautrix.MUnknown.WithMessage(message).Write(w)
+		mautrix.MUnknown.WithMessage(message).WithInternalError(err).Write(w)
 	}
 }
 
@@ -699,6 +511,101 @@ func (prov *ProvisioningAPI) PostCreateGroup(w http.ResponseWriter, r *http.Requ
 	resp, err := provisionutil.CreateGroup(r.Context(), login, &req)
 	if err != nil {
 		RespondWithError(w, err, "Internal error creating group")
+		return
+	}
+	exhttp.WriteJSONResponse(w, http.StatusOK, resp)
+}
+
+func (prov *ProvisioningAPI) PostPaginate(w http.ResponseWriter, r *http.Request) {
+	if !prov.br.Capabilities.BatchSending {
+		mautrix.MUnrecognized.WithMessage("Homeserver does not support batch sending historical messages").Write(w)
+		return
+	} else if !prov.br.Config.Backfill.Queue.Manual {
+		mautrix.MUnrecognized.WithMessage("Manual backfill is not enabled").Write(w)
+		return
+	}
+	log := zerolog.Ctx(r.Context())
+	login := prov.GetLoginForRequest(w, r)
+	if login == nil {
+		return
+	}
+	targetRoomID := id.RoomID(r.PathValue("roomID"))
+	portal, err := prov.br.Bridge.GetPortalByMXID(r.Context(), targetRoomID)
+	if err != nil {
+		log.Err(err).Msg("Failed to get portal for pagination")
+		RespondWithError(w, err, "Internal error getting portal")
+	} else if portal == nil {
+		log.Debug().Stringer("target_room_id", targetRoomID).Msg("Paginate requested for unknown portal room")
+		mautrix.MNotFound.WithMessage("Portal not found").Write(w)
+	} else if task, err := prov.br.Bridge.DB.BackfillTask.GetNextForPortal(r.Context(), portal.PortalKey, false); err != nil {
+		log.Err(err).Msg("Failed to get backfill task for portal")
+		RespondWithError(w, err, "Internal error getting backfill task")
+	} else if task == nil {
+		log.Debug().Msg("No backfill task found for portal")
+		w.WriteHeader(http.StatusNoContent)
+	} else {
+		log.Info().
+			Object("portal_key", portal.PortalKey).
+			Any("current_backfill_task", task).
+			Msg("Sending manual backfill request to backfill queue")
+		doneChan := make(chan error, 1)
+		var done atomic.Bool
+		prov.br.Bridge.WakeupBackfillQueue(&bridgev2.ManualBackfill{
+			Source: login,
+			Portal: portal,
+			DoneCallback: func(err error) {
+				if done.Swap(true) {
+					log.Warn().Err(err).Msg("Backfill done callback called multiple times, ignoring")
+					return
+				}
+				log.Debug().Msg("Backfill done callback called, sending result to channel")
+				doneChan <- err
+				close(doneChan)
+			},
+		})
+		select {
+		case err = <-doneChan:
+			if err != nil {
+				RespondWithError(w, err, "Internal error backfilling")
+			} else {
+				exhttp.WriteEmptyJSONResponse(w, http.StatusOK)
+			}
+		case <-time.After(25 * time.Second):
+			log.Warn().Msg("Backfill did not complete within 25 seconds, returning timeout")
+			mautrix.MUnknown.WithMessage("Backfill did not complete within 25 seconds").Write(w)
+		case <-r.Context().Done():
+			log.Warn().Msg("Request cancelled while waiting for backfill to complete")
+		}
+	}
+}
+
+func (prov *ProvisioningAPI) ImportImagePack(w http.ResponseWriter, r *http.Request) {
+	login := prov.GetLoginForRequest(w, r)
+	if login == nil {
+		return
+	}
+	var resp any
+	var err error
+	if r.Method == http.MethodPost {
+		resp, err = provisionutil.ImportImagePack(r.Context(), login, r.URL.Query().Get("pack_url"))
+	} else {
+		resp, err = provisionutil.PreviewImagePack(r.Context(), login, r.URL.Query().Get("pack_url"))
+	}
+	if err != nil {
+		RespondWithError(w, err, "Internal error importing image pack")
+		return
+	}
+	exhttp.WriteJSONResponse(w, http.StatusOK, resp)
+}
+
+func (prov *ProvisioningAPI) ListImagePacks(w http.ResponseWriter, r *http.Request) {
+	login := prov.GetLoginForRequest(w, r)
+	if login == nil {
+		return
+	}
+	resp, err := provisionutil.ListImagePacks(r.Context(), login)
+	if err != nil {
+		RespondWithError(w, err, "Internal error listing image packs")
 		return
 	}
 	exhttp.WriteJSONResponse(w, http.StatusOK, resp)
